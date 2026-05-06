@@ -1,0 +1,35 @@
+# --- Project data: large or license-restricted, fetched/provided locally ---
+data/videos/
+data/ego4d/
+!data/videos/.gitkeep
+!data/ego4d/.gitkeep
+
+# Pipeline-derived caches and run outputs (regenerable)
+results/
+!results/.gitkeep
+data/cache/
+**/__pycache__/
+
+# Experiment outputs: keep the directory structure but ignore individual runs
+experiments/*
+!experiments/.gitkeep
+!experiments/**/config.yaml
+!experiments/**/metrics.json
+!experiments/**/README.md
+
+# --- Python ---
+*.py[cod]
+*.egg-info/
+.venv/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Editor / OS ---
+.DS_Store
+.vscode/
+.idea/
+
+# --- uv ---
+# uv.lock is intentionally NOT ignored; it pins the reproducible env.
