@@ -10,12 +10,6 @@ results/
 data/cache/
 **/__pycache__/
 
-# Experiment outputs: keep the directory structure but ignore individual runs
-experiments/*
-!experiments/.gitkeep
-!experiments/**/config.yaml
-!experiments/**/metrics.json
-!experiments/**/README.md
 
 # --- Python ---
 *.py[cod]
