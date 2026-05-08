@@ -33,3 +33,6 @@ experiments/*
 
 # --- uv ---
 # uv.lock is intentionally NOT ignored; it pins the reproducible env.
+
+notebooks/*.pt                                                                                                                                                                                                                                            
+notebooks/*.ts

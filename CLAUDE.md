@@ -60,19 +60,23 @@ Pick 5–10 positive and 5–10 negative frames from labeled videos. Run candida
 models in a notebook. Compare outputs side by side. Decide which models go in
 the pipeline based on what was actually observed.
 
-Candidate models for this stage:
-- OWLv2 image-guided
-- OWLv2 text-guided
-- DINOv2 similarity (region-feature matching)
-- Grounding DINO
-- YOLO-World
-- DetCLIP
-- Florence-2
-- T-Rex2 (optional, if accessible)
+Split into two sub-notebooks:
 
-Deliverable: a short comparison note (in `notebooks/` or `experiments/stage1/`)
-recording which models are kept, which are dropped, and the reason. No
-production wrappers yet.
+**1a — Object detection** (`notebooks/stage1_model_comparison.py`, written):
+- *Image-guided lane:* OWLv2 image-guided, YOLOE visual-prompt, SAM 3 visual.
+- *Text-guided lane:* OWLv2 text-guided, YOLO-World v2, YOLOE text, SAM 3
+  text, Grounding DINO, OmDet-Turbo, Florence-2.
+- Skipped: DetCLIP (no clean pip path), T-Rex2 (gated weights).
+
+**1b — Visual embedding for re-ranking** (separate notebook, not yet written):
+- DINOv2 (baseline), DINOv3 (newer; restricted license — flag before using),
+  SigLIP 2 (real alternative, may outperform DINOv2 on retrieval-flavored
+  tasks), EVA-CLIP / EVA-02. CLIP variants and FashionCLIP are dominated and
+  can be skipped.
+
+Deliverable: a short comparison note in `experiments/stage1/` recording which
+models are kept, which are dropped, and the reason. No production wrappers
+yet — these notebooks are exploratory.
 
 ### `[ ]` Stage 2 — Frame extraction
 Build the component that takes a video and a list of timestamps and returns

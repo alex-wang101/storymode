@@ -1,0 +1,38 @@
+{
+    "product_name": "ZBiotics Pre-Alcohol Probiotic Drink bottle",
+    "primary_detection_prompt": "small frosted glass probiotic drink bottle with black ribbed cap and large black angular Z logo",
+    "alternate_prompts": [
+      "ZBiotics bottle",
+      "small clear glass bottle with black screw cap",
+      "small probiotic shot bottle with black Z logo",
+      "mini wellness drink bottle with black cap and white liquid",
+      "15 mL frosted glass vial with large black Z-shaped logo",
+      "small cylindrical supplement drink bottle"
+    ],
+    "visual_attributes": {
+      "shape": "short narrow cylindrical glass bottle with rounded shoulders and short transparent neck",
+      "cap": "black ribbed plastic screw cap, wider than the neck, flat top",
+      "body": "clear or frosted transparent glass bottle filled with cloudy off-white liquid",
+      "label": "minimal front label with large bold black angular Z-shaped logo",
+      "text": "small vertical orange text on the left side reading pre-alcohol probiotic drink; small vertical black volume text near the right edge",
+      "color_palette": ["black cap", "clear/frosted glass", "off-white liquid", "black logo", "small orange text"],
+      "scale": "very small bottle, approximately shot-sized or vial-sized"
+    },
+    "hard_negative_objects": [
+      "regular water bottle",
+      "large beverage bottle",
+      "medicine pill bottle",
+      "perfume bottle",
+      "essential oil bottle",
+      "generic glass vial without black Z logo",
+      "small bottle with white cap",
+      "black-capped bottle without large black Z logo"
+    ],
+    "most_important_matching_features": [
+      "large black angular Z logo on the front",
+      "black ribbed screw cap",
+      "small frosted/clear glass bottle",
+      "cloudy off-white liquid inside",
+      "short 15 mL shot-bottle proportions"
+    ]
+  }
