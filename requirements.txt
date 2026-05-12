@@ -1,0 +1,29 @@
+# Core dependencies for `python main.py detect-sponsors`.
+# Auto-installed by main.py if any core import is missing.
+
+# Sponsor-segment extraction (T5 seq2seq + tokenizer)
+torch
+transformers
+
+# YouTube transcript fetching
+yt-dlp
+
+# Brand text matching (used by BRAND_eval notebook + production brand path)
+easyocr
+rapidfuzz
+
+# Open-vocab object detection (used by OVOD_eval notebook + production)
+ultralytics
+open_clip_torch
+
+# Image handling + visualization (notebooks + CLI helpers)
+matplotlib
+pillow
+
+# numpy 2.x has C-ABI breakage with several common packages (pyarrow etc.).
+# Pinning to <2 keeps the stack consistent.
+numpy<2
+
+# Misc
+accelerate
+torchvision

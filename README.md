@@ -11,9 +11,17 @@ engineering.
 
 ## Status
 
-Stage 1 — model comparison. Stage 0 (eval-set labeling) is running in
-parallel. See [`CLAUDE.md`](./CLAUDE.md) for the canonical stage map and
-current progress; that file is updated as stages complete.
+- **Stage 1 — model comparison.** Complete. See `notebooks/OVOD_eval.ipynb`
+  (open-vocabulary object detectors) and `notebooks/BRAND_eval.ipynb`
+  (OCR primary + SigLIP 2 NaFlex fallback against a logo reference). The
+  earlier image-image SSL eval (`notebooks/SSL_EVAL.ipynb`) is kept as a
+  documented baseline; image-image similarity proved less reliable on
+  brand-specific discrimination than the OCR + logo-similarity combo.
+- **Stage 2 — sponsor region detection.** In progress. `main.py
+  detect-sponsors` uses `Xenova/sponsorblock-small` to identify sponsor
+  segments in a YouTube transcript. See the "Replicate the pipeline"
+  section below.
+- `CLAUDE.md` has the full stage map and what's planned next.
 
 ## Problem
 
@@ -94,48 +102,87 @@ Output schema, one record per interval:
 Signals are reported separately. There is no combined "final confidence" score —
 this is a deliberate choice for honesty and debuggability.
 
-## Quickstart
+## Replicate the pipeline
 
-Reproduces the pipeline on a 30-second clip bundled in `data/samples/`.
+Stage 2 (sponsor region detection) has a working end-to-end CLI. The other
+stages live in notebooks under `notebooks/` and are explored interactively.
 
-```bash
-# 1. Install dependencies into a uv-managed virtualenv
-uv sync
-
-# 2. Run the pipeline on the bundled sample
-uv run python eval/run_pipeline.py \
-  --video data/samples/sample_video.mp4 \
-  --reference data/samples/sample_reference.jpg \
-  --output results/sample.json
-```
-
-Expected runtime on M4 Pro: ~`TODO` seconds. First run will download model
-weights from Hugging Face into the local cache.
-
-## Reproducing the reported numbers
-
-Ground-truth interval annotations are checked in at `eval/labels.json`. Eval
-videos are not bundled (size and licensing); a downloader fetches them by URL.
+### Install
 
 ```bash
-# 1. Fetch the YouTube eval videos (yt-dlp; requires ffmpeg on PATH)
-uv run python scripts/download_data.py
-
-# 2. (Optional) place EGO4D clips listed in data/ego4d_clip_ids.json
-#    into data/ego4d/. EGO4D access requires accepting their license;
-#    see data/README.md.
-
-# 3. Run the pipeline across the eval set
-uv run python eval/run_pipeline.py --eval --config configs/<run_id>.yaml
-
-# 4. Compute and print the reported metrics
-uv run python eval/reproduce_eval.py --run experiments/<run_id>
+# Python 3.10+ recommended.
+pip install torch transformers yt-dlp easyocr rapidfuzz pillow
 ```
 
-Every reported number in the blog post corresponds to a frozen run under
-`experiments/<run_id>/` containing the exact `config.yaml` used. Changing any
-threshold, sampling parameter, or model revision moves the numbers; the config
-is the source of truth.
+That's the minimal set for `main.py detect-sponsors` to run. For the
+Stage 1 notebooks (OVOD, SSL, BRAND evals) also install `ultralytics`,
+`open_clip_torch`, `matplotlib`, and `numpy<2` — there's a `%pip install`
+cell at the top of each notebook with the exact list.
+
+### Run sponsor detection on the bundled research transcript
+
+The repo ships with the transcript used during research (a 21-minute
+bacon-curing YouTube video) at `data/references/transcript.json`. Run
+sponsor detection against it with no arguments:
+
+```bash
+python main.py detect-sponsors
+```
+
+Expected output (timestamps will vary based on what the model finds):
+
+```
+Loading bundled transcript: .../data/references/transcript.json
+  N transcript items, 1250.0s, 'Possibly The BEST Bacon EVER!...'
+Loading sponsorblock model...
+Detecting sponsor segments...
+
+Sponsored segments (N found):
+   <start> -  <end> sec    (sponsor)
+   ...
+```
+
+To eyeball whether the predictions are right, cross-reference the
+timestamps against the transcript items in `data/references/transcript.json`
+— the text near a predicted segment should read like a sponsor read.
+
+### Run on your own YouTube video
+
+Pass any YouTube URL with `--url`. `yt-dlp` fetches the auto-caption track
+and formats it into the same dict shape as the bundled transcript:
+
+```bash
+python main.py detect-sponsors --url https://www.youtube.com/watch?v=<id>
+```
+
+### Save results to JSON
+
+```bash
+python main.py detect-sponsors --output results.json
+python main.py detect-sponsors --url <url> --output results.json
+```
+
+The JSON contains only the timestamps + categories of detected sponsor
+segments, plus the video metadata. The full per-segment text and
+classifier confidence are returned by the Python API
+(`pipeline.sponsor_detect.find_sponsor_intervals`) but trimmed from the
+CLI output for simplicity.
+
+### Notebooks (Stage 1 — model comparison)
+
+The Stage 1 work lives in three Jupyter notebooks under `notebooks/`:
+
+- `OVOD_eval.ipynb` — open-vocabulary object detectors compared on hand-
+  picked positive / negative frames. Outputs `experiments/stage1/ovod_detections.jsonl`.
+- `SSL_EVAL.ipynb` — image-image similarity (DINOv2 / SigLIP 2 / EVA-02)
+  re-ranking OVOD output. Kept as a documented baseline; not used in
+  production.
+- `BRAND_eval.ipynb` — OCR (EasyOCR + rapidfuzz against brand keywords)
+  primary, NaFlex image-image vs `logo.png` fallback. The production
+  brand-verification path.
+
+Open in Jupyter or VSCode, run the install cell once, then run the
+remaining cells top-to-bottom.
 
 ## Evaluation methodology
 
@@ -160,44 +207,30 @@ is the source of truth.
 
 ```
 videofind/
-├── README.md                    # this file
-├── pyproject.toml               # pinned dependencies (uv-managed)
-├── uv.lock                      # locked resolution; checked in for reproducibility
+├── README.md                       # this file
+├── CLAUDE.md                       # stage map and current progress
+├── main.py                         # single CLI entry point with subcommands
+├── pipeline/
+│   ├── __init__.py
+│   ├── transcript_ingest.py        # load_from_file + fetch_from_youtube (yt-dlp)
+│   └── sponsor_detect.py           # load_models + find_sponsor_intervals
 ├── data/
-│   ├── README.md                # what's bundled, what's downloaded, licensing
-│   ├── references/              # CHECKED IN — reference object images
-│   │   └── <object_name>/
-│   │       ├── front.jpg
-│   │       └── README.md        # source, license, notes for this object
-│   ├── samples/                 # CHECKED IN — quickstart demo clip + reference
-│   │   ├── sample_video.mp4
-│   │   └── sample_reference.jpg
-│   ├── videos/                  # GITIGNORED — fetched by scripts/download_data.py
-│   ├── ego4d/                   # GITIGNORED — user-provided, license-gated
-│   └── ego4d_clip_ids.json      # CHECKED IN — manifest of EGO4D clips used
-├── eval/
-│   ├── labels.json              # CHECKED IN — ground-truth interval annotations
-│   ├── run_pipeline.py          # CLI: pipeline on one video or the eval set
-│   └── reproduce_eval.py        # CLI: regenerates the reported metrics
-├── configs/                     # YAML configs per experiment
-├── src/videofind/
-│   ├── stage1_transcript/
-│   ├── stage2_sampling/
-│   ├── stage3_detection/
-│   ├── stage4_rerank/
-│   ├── stage5_aggregation/
-│   ├── eval/                    # metric implementations, sweep harness
-│   └── utils/
-├── scripts/
-│   └── download_data.py
-├── notebooks/                   # exploratory work; not part of the reproduction path
-├── experiments/                 # one directory per recorded run
-│   └── <run_id>/
-│       ├── config.yaml          # frozen config
-│       ├── metrics.json         # reported numbers
-│       └── README.md            # short description of the run
-├── tests/
-└── results/                     # GITIGNORED — ad-hoc local outputs
+│   ├── references/
+│   │   ├── zbiotics.json           # brand metadata: prompts, keywords, features
+│   │   ├── zbiotics.png            # full product reference photo
+│   │   ├── logo.png                # brand-logo-only reference (used by NaFlex)
+│   │   └── transcript.json         # bundled research transcript (bacon video)
+│   └── frames/                     # hand-picked positive/negative frames for Stage 1
+│       ├── positive_easy/          # bottle clearly visible
+│       ├── positive_hard/          # bottle partial/occluded
+│       ├── negative_easy/          # no bottles in frame
+│       └── negative_hard/          # bottles that aren't ZBiotics
+├── notebooks/
+│   ├── OVOD_eval.ipynb             # Stage 1a: detector comparison
+│   ├── SSL_EVAL.ipynb              # Stage 1b: image-image similarity baseline (deprecated)
+│   └── BRAND_eval.ipynb            # Stage 1c: OCR + NaFlex brand verification
+├── experiments/stage1/             # eval outputs from the notebooks (JSONL + summaries + figures)
+└── scripts/                        # ad-hoc helpers (currently empty)
 ```
 
 ### Conventions
@@ -219,13 +252,19 @@ videofind/
 
 ## Models
 
-| Stage | Model | HF id | Pinned revision |
-| ----- | ----- | ----- | --------------- |
-| 1     | sentence-transformers (small embedder) | `TODO` | `TODO` |
-| 3     | OWLv2 (image-guided detector)          | `TODO` | `TODO` |
-| 4     | DINOv2 (visual encoder)                | `TODO` | `TODO` |
+| Stage                        | Purpose                                    | HF id                                   | License        |
+| ---------------------------- | ------------------------------------------ | --------------------------------------- | -------------- |
+| OVOD                         | Open-vocab detection (text-guided)         | `google/owlv2-base-patch16-ensemble`    | Apache 2.0     |
+| Brand text                   | OCR (EasyOCR; ResNet/CRNN under the hood)  | bundled with `easyocr` pip package      | Apache 2.0     |
+| Brand logo                   | Image-image similarity (aspect-preserving) | `google/siglip2-base-patch16-naflex`    | Apache 2.0     |
+| Sponsor region (Stage 2)     | Sponsor-segment extraction from transcript | `Xenova/sponsorblock-small`             | CC BY-NC-SA 4.0 (training data) |
+| Sponsor region (Stage 2)     | Optional segment-category refinement       | `Xenova/sponsorblock-classifier`        | CC BY-NC-SA 4.0 |
 
-Revisions are filled in once Phase 1 (hello-world end-to-end) selects them.
+Earlier eval (`SSL_EVAL.ipynb`) compared `facebook/dinov2-base`,
+`facebook/dinov3-vitb16-pretrain-lvd1689m`, `google/siglip2-base-patch16-256`,
+and an EVA-02 CLIP variant via `open_clip` for image-image re-ranking. The
+SigLIP 2 NaFlex (logo-only) approach replaced these in the production
+brand-verification path.
 
 ## What's deliberately out of scope
 
@@ -245,7 +284,22 @@ Revisions are filled in once Phase 1 (hello-world end-to-end) selects them.
 
 ## License
 
-`TODO` — pick before publishing.
+This project is **non-commercial only**. The Stage 2 sponsor-region
+detection uses `Xenova/sponsorblock-small`, a T5 model trained on the
+SponsorBlock community database, which is licensed
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/).
+That non-commercial restriction is inherited by anything that depends
+on those weights. If you fork this repo and want to commercialize, you
+would need to re-train the sponsor-region detector on permissively
+licensed data.
+
+The repository's own code is otherwise unencumbered (project-license
+TBD; intended permissive for the code itself, with the non-commercial
+restriction applying only to the SponsorBlock-dependent path).
+
+Attribution: SponsorBlock by Ajay Ramachandran
+(https://sponsor.ajay.app/); model by Xenova
+(https://github.com/xenova/sponsorblock-ml).
 
 ## Citation
 
