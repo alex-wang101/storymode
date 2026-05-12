@@ -1,0 +1,28 @@
+{
+  "ovod_model": "owlv2_text_guided",
+  "n_detections": 46,
+  "combined_brand": {
+    "pos_easy": 0.8823738992214203,
+    "pos_hard": 0.5863523781299591,
+    "neg_easy": null,
+    "neg_hard": 0.521400511264801,
+    "pos_mean": 0.7343631386756897,
+    "neg_mean": 0.521400511264801,
+    "separation": 0.21296262741088867,
+    "auc": 1.0,
+    "top1": 1.0,
+    "n_frames": 6
+  },
+  "owlv2_text_score": {
+    "pos_easy": 0.465735986828804,
+    "pos_hard": 0.18833976984024048,
+    "neg_easy": null,
+    "neg_hard": 0.37227874994277954,
+    "pos_mean": 0.32703787833452225,
+    "neg_mean": 0.37227874994277954,
+    "separation": -0.045240871608257294,
+    "auc": 0.375,
+    "top1": 0.25,
+    "n_frames": 6
+  }
+}
