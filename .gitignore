@@ -30,3 +30,4 @@ data/cache/
 
 notebooks/*.pt                                                                                                                                                                                                                                            
 notebooks/*.ts
+experiments/stage2/*

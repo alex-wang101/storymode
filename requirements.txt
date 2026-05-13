@@ -1,29 +1,34 @@
-# Core dependencies for `python main.py detect-sponsors`.
+# Dependencies for the videofind pipeline.
 # Auto-installed by main.py if any core import is missing.
 
-# Sponsor-segment extraction (T5 seq2seq + tokenizer)
+# pipeline/sponsor_detect.py  --  Xenova/sponsorblock-small (T5 seq2seq) + tokenizer
 torch
 transformers
 
-# YouTube transcript fetching
+# pipeline/transcript_ingest.py  --  fetch YouTube auto-captions
 yt-dlp
 
-# Brand text matching (used by BRAND_eval notebook + production brand path)
+# pipeline/frame_sampler.py  --  decode video frames with OpenCV
+opencv-python
+
+# pipeline/object_detector.py  --  OWLv2 text-guided detection
+#   (uses torch + transformers above; no extra deps)
+
+# pipeline/brand_detector.py  --  EasyOCR + SigLIP 2 NaFlex
+#   (NaFlex itself comes from transformers above)
 easyocr
 rapidfuzz
-
-# Open-vocab object detection (used by OVOD_eval notebook + production)
-ultralytics
-open_clip_torch
-
-# Image handling + visualization (notebooks + CLI helpers)
-matplotlib
 pillow
 
-# numpy 2.x has C-ABI breakage with several common packages (pyarrow etc.).
-# Pinning to <2 keeps the stack consistent.
+# pipeline/schema.py  --  numpy.ndarray field on SampledFrame
+# Numpy 2.x has C-ABI breakage with several common packages (pyarrow etc.);
+# pinning to <2 keeps the full stack consistent.
 numpy<2
 
-# Misc
+# Used by the Stage 1 notebooks (OVOD_eval, SSL_EVAL, BRAND_eval). Not required
+# for the production CLI, but harmless to install alongside.
+ultralytics
+open_clip_torch
+matplotlib
 accelerate
 torchvision

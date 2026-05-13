@@ -104,82 +104,177 @@ this is a deliberate choice for honesty and debuggability.
 
 ## Replicate the pipeline
 
-Stage 2 (sponsor region detection) has a working end-to-end CLI. The other
-stages live in notebooks under `notebooks/` and are explored interactively.
+`python main.py run` is the headline command — it chains transcript
+ingest → sponsor detection → frame sampling → OWLv2 text-guided
+detection → OCR-primary / NaFlex-fallback brand verification, end to
+end, and prints (or writes) a per-region summary.
+
+`python main.py detect-sponsors` runs only the sponsor-detection stage,
+useful for inspecting what SponsorBlock-ML finds before any video frame
+work happens.
 
 ### Install
 
+**You don't need to install anything manually.** The first time you run
+either subcommand, `main.py` checks the core imports (`torch`,
+`transformers`, `yt_dlp`, `cv2`, `easyocr`, `rapidfuzz`, `PIL`) and, if
+any are missing, auto-runs `pip install -r requirements.txt` before
+proceeding. Subsequent runs skip the check (sub-millisecond) and start
+immediately.
+
+If you'd rather install manually first:
+
 ```bash
-# Python 3.10+ recommended.
-pip install torch transformers yt-dlp easyocr rapidfuzz pillow
+pip install -r requirements.txt
 ```
 
-That's the minimal set for `main.py detect-sponsors` to run. For the
-Stage 1 notebooks (OVOD, SSL, BRAND evals) also install `ultralytics`,
-`open_clip_torch`, `matplotlib`, and `numpy<2` — there's a `%pip install`
-cell at the top of each notebook with the exact list.
+Python 3.10+ recommended. `requirements.txt` covers both the CLI and
+the Stage 1 notebooks; the notebooks also have their own `%pip install`
+cell at the top in case you want to run them in a different environment.
 
-### Run sponsor detection on the bundled research transcript
+### Run the full pipeline on bundled assets
 
 The repo ships with the transcript used during research (a 21-minute
-bacon-curing YouTube video) at `data/references/transcript.json`. Run
-sponsor detection against it with no arguments:
+bacon-curing YouTube video) at `data/references/transcript.json`. You
+also need the source video file at `data/videos/zbiotics-bacon.mp4` —
+not bundled in git (size / licensing), place it there yourself.
 
 ```bash
-python main.py detect-sponsors
+python main.py run
 ```
 
-Expected output (timestamps will vary based on what the model finds):
+Stages in order:
 
-```
-Loading bundled transcript: .../data/references/transcript.json
-  N transcript items, 1250.0s, 'Possibly The BEST Bacon EVER!...'
-Loading sponsorblock model...
-Detecting sponsor segments...
+1. Load the bundled transcript.
+2. Load `Xenova/sponsorblock-small` and predict sponsor regions.
+3. **Filter to `category == "sponsor"`** — `selfpromo` / `interaction` /
+   etc. regions are dropped before any video work.
+4. Decode and sample frames inside each sponsor region (OpenCV, ~2 fps,
+   ±5 s buffer).
+5. Run OWLv2 text-guided detection per frame using the prompts in
+   `data/references/zbiotics.json`.
+6. For each detection, OCR-primary scoring (EasyOCR + rapidfuzz vs
+   `brand_text_keywords`) with NaFlex image-image fallback against
+   `data/references/logo.png` when OCR returned no text.
+7. Aggregate per region; print summary; optionally write JSON.
 
-Sponsored segments (N found):
-   <start> -  <end> sec    (sponsor)
-   ...
-```
-
-To eyeball whether the predictions are right, cross-reference the
-timestamps against the transcript items in `data/references/transcript.json`
-— the text near a predicted segment should read like a sponsor read.
+Each model is loaded and freed in sequence; peak RAM stays around 5–6 GB
+on a 16 GB Mac.
 
 ### Run on your own YouTube video
 
-Pass any YouTube URL with `--url`. `yt-dlp` fetches the auto-caption track
-and formats it into the same dict shape as the bundled transcript:
-
 ```bash
-python main.py detect-sponsors --url https://www.youtube.com/watch?v=<id>
+python main.py run --url https://www.youtube.com/watch?v=<id>
 ```
 
-### Save results to JSON
+`yt-dlp` fetches the auto-caption track. The video file itself must be
+present at `data/cache/videos/<id>.mp4` — the current pipeline does not
+auto-download the video (only captions). Until that's added, you can
+download manually:
 
 ```bash
-python main.py detect-sponsors --output results.json
-python main.py detect-sponsors --url <url> --output results.json
+yt-dlp -f mp4 -o "data/cache/videos/%(id)s.%(ext)s" https://www.youtube.com/watch?v=<id>
+python main.py run --url https://www.youtube.com/watch?v=<id>
 ```
 
-The JSON contains only the timestamps + categories of detected sponsor
-segments, plus the video metadata. The full per-segment text and
-classifier confidence are returned by the Python API
-(`pipeline.sponsor_detect.find_sponsor_intervals`) but trimmed from the
-CLI output for simplicity.
+### Save the per-region summary to JSON
+
+```bash
+python main.py run --output results.json
+python main.py run --url <url> --output results.json
+```
+
+### Output format
+
+**Stdout** (always printed):
+
+```
+Run summary
+  3 sponsor region(s) detected
+  612 frames sampled
+  2,841 OWLv2 detection(s)
+  OCR primary, NaFlex fallback
+
+  Region 0  [   87.5s,   173.2s]    123 frames     412 dets
+            ocr_hits= 18   max_ocr=0.92   max_naflex=0.78   max_combined=0.92
+  Region 1  [  445.0s,   502.8s]     87 frames     215 dets
+            ocr_hits=  2   max_ocr=0.31   max_naflex=0.32   max_combined=0.32
+
+  Highest combined brand score: Region 0 (combined=0.92, signal=ocr)
+```
+
+**`results.json`** (only with `--output`) — same per-region aggregates,
+machine-readable:
+
+```json
+{
+  "video": {
+    "id": "4GBf9ZO2UN8",
+    "url": "https://www.youtube.com/watch?v=4GBf9ZO2UN8",
+    "title": "Possibly The BEST Bacon EVER!...",
+    "duration_seconds": 1250.0
+  },
+  "sponsor_regions": [
+    {
+      "region_index": 0,
+      "start": 87.5,
+      "end": 173.2,
+      "category": "sponsor",
+      "frames_sampled": 123,
+      "owlv2_detections": 412,
+      "ocr_hits": 18,
+      "max_ocr_score": 0.92,
+      "max_naflex_score": 0.78,
+      "max_combined_score": 0.92,
+      "best_signal": "ocr"
+    }
+  ]
+}
+```
+
+Per-detection raw records (every box with its scores) are intentionally
+not in the JSON — for the headline answer the per-region aggregate is
+enough. The Python API
+(`pipeline.brand_detector.score_detections`) returns the full
+`BrandDetection` list if a downstream caller needs that detail.
+
+### Stage 2 only (sponsor detection inspection)
+
+`python main.py detect-sponsors` runs just the SponsorBlock-ML pass.
+Useful when you want to see *all* categories the model emits (`sponsor`,
+`selfpromo`, `interaction`, etc.) before the `run` command's filter
+drops the non-`sponsor` ones.
+
+```bash
+python main.py detect-sponsors                   # bundled transcript
+python main.py detect-sponsors --url <url>       # any YouTube URL
+python main.py detect-sponsors --output FILE     # also write JSON
+```
+
+Stdout looks like:
+
+```
+Sponsored segments (3 found):
+   87.5 - 173.2 sec    (sponsor)
+  430.0 - 445.0 sec    (selfpromo)
+  912.5 - 945.0 sec    (sponsor)
+```
+
+This command makes no `category` filter — it shows everything. The
+`run` command's filter to `sponsor` only happens downstream of it.
 
 ### Notebooks (Stage 1 — model comparison)
 
 The Stage 1 work lives in three Jupyter notebooks under `notebooks/`:
 
-- `OVOD_eval.ipynb` — open-vocabulary object detectors compared on hand-
-  picked positive / negative frames. Outputs `experiments/stage1/ovod_detections.jsonl`.
+- `OVOD_eval.ipynb` — open-vocabulary object detectors compared on
+  hand-picked positive / negative frames. Outputs
+  `experiments/stage1/ovod_detections.jsonl`.
 - `SSL_EVAL.ipynb` — image-image similarity (DINOv2 / SigLIP 2 / EVA-02)
   re-ranking OVOD output. Kept as a documented baseline; not used in
   production.
-- `BRAND_eval.ipynb` — OCR (EasyOCR + rapidfuzz against brand keywords)
-  primary, NaFlex image-image vs `logo.png` fallback. The production
-  brand-verification path.
+- `BRAND_eval.ipynb` — OCR primary, NaFlex image-image vs `logo.png`
+  fallback. The production brand-verification recipe.
 
 Open in Jupyter or VSCode, run the install cell once, then run the
 remaining cells top-to-bottom.
