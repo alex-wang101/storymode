@@ -31,8 +31,14 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_TRANSCRIPT_PATH = REPO_ROOT / "data" / "references" / "transcript.json"
-DEFAULT_VIDEO_PATH = REPO_ROOT / "data" / "videos" / "zbiotics-bacon.mp4"
+
+# Bundled-asset pairs. Each pair is (transcript JSON, video file). Same
+# brand and logo for both -- only the source video differs.
+BACON_TRANSCRIPT_PATH = REPO_ROOT / "data" / "references" / "transcript_bacon.json"
+BACON_VIDEO_PATH = REPO_ROOT / "data" / "videos" / "zbiotics-bacon.mp4"
+PICKLES_TRANSCRIPT_PATH = REPO_ROOT / "data" / "references" / "transcript_pickles.json"
+PICKLES_VIDEO_PATH = REPO_ROOT / "data" / "videos" / "zbiotics-pickles.mp4"
+
 LOGO_PATH = REPO_ROOT / "data" / "references" / "logo.png"
 BRAND_JSON_PATH = REPO_ROOT / "data" / "references" / "zbiotics.json"
 VIDEO_CACHE_DIR = REPO_ROOT / "data" / "cache" / "videos"
@@ -79,8 +85,9 @@ def cmd_detect_sponsors(args):
         print(f"Fetching transcript via yt-dlp: {args.url}", file=sys.stderr)
         transcript = fetch_from_youtube(args.url)
     else:
-        print(f"Loading bundled transcript: {DEFAULT_TRANSCRIPT_PATH}", file=sys.stderr)
-        transcript = load_from_file(DEFAULT_TRANSCRIPT_PATH)
+        transcript_path, _ = _resolve_inputs(args)
+        print(f"Loading bundled transcript: {transcript_path}", file=sys.stderr)
+        transcript = load_from_file(transcript_path)
 
     n_items = len(transcript.get("items", []))
     duration = transcript.get("duration_seconds") or 0.0
@@ -141,14 +148,30 @@ def _load_brand_metadata():
     return text_queries, brand_keywords
 
 
+def _resolve_inputs(args):
+    """Pick the (transcript_path_or_None, video_path) pair from the source flags.
+
+    Returns ``(transcript_path, video_path)`` where ``transcript_path`` is
+    ``None`` for URL mode (caller fetches via yt-dlp instead). Bacon is the
+    default if no source flag is given.
+    """
+    if getattr(args, "url", None):
+        return None, None  # caller handles URL mode separately
+    if getattr(args, "pickles", False):
+        return PICKLES_TRANSCRIPT_PATH, PICKLES_VIDEO_PATH
+    return BACON_TRANSCRIPT_PATH, BACON_VIDEO_PATH
+
+
 def _resolve_video_path(args, transcript):
     """Return the local video file path for the current run mode."""
-    if args.url:
+    if getattr(args, "url", None):
         video_id = transcript.get("video_id")
         if not video_id:
             sys.exit("URL mode requires a video_id in the transcript; yt-dlp should have provided it.")
         return VIDEO_CACHE_DIR / f"{video_id}.mp4"
-    return DEFAULT_VIDEO_PATH
+    if getattr(args, "pickles", False):
+        return PICKLES_VIDEO_PATH
+    return BACON_VIDEO_PATH
 
 
 def _run_pipeline_up_to_brand(args):
@@ -162,12 +185,13 @@ def _run_pipeline_up_to_brand(args):
     from pipeline.transcript_ingest import fetch_from_youtube, load_from_file
 
     # 1. Transcript
-    if args.url:
+    if getattr(args, "url", None):
         print(f"Fetching transcript via yt-dlp: {args.url}", file=sys.stderr)
         transcript = fetch_from_youtube(args.url)
     else:
-        print(f"Loading bundled transcript: {DEFAULT_TRANSCRIPT_PATH}", file=sys.stderr)
-        transcript = load_from_file(DEFAULT_TRANSCRIPT_PATH)
+        transcript_path, _ = _resolve_inputs(args)
+        print(f"Loading bundled transcript: {transcript_path}", file=sys.stderr)
+        transcript = load_from_file(transcript_path)
     n_items = len(transcript.get("items", []))
     duration = transcript.get("duration_seconds") or 0.0
     title = transcript.get("title", "") or "(no title)"
@@ -400,10 +424,21 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def _add_detect_args(p, default_threshold):
-        p.add_argument(
+        src = p.add_mutually_exclusive_group()
+        src.add_argument(
             "--url",
             default=None,
-            help="YouTube URL to fetch the transcript via yt-dlp (default: bundled transcript).",
+            help="YouTube URL to fetch the transcript via yt-dlp.",
+        )
+        src.add_argument(
+            "--bacon",
+            action="store_true",
+            help="Use the bundled bacon-curing video and transcript (default).",
+        )
+        src.add_argument(
+            "--pickles",
+            action="store_true",
+            help="Use the bundled pickleback video and transcript.",
         )
         p.add_argument(
             "--output",
@@ -459,10 +494,21 @@ def build_parser():
         "detect-sponsors",
         help="Stage 2 only: detect sponsor segments from a transcript.",
     )
-    p_sponsors.add_argument(
+    src_sp = p_sponsors.add_mutually_exclusive_group()
+    src_sp.add_argument(
         "--url",
         default=None,
-        help="YouTube URL to fetch the transcript via yt-dlp (default: use bundled transcript).",
+        help="YouTube URL to fetch the transcript via yt-dlp.",
+    )
+    src_sp.add_argument(
+        "--bacon",
+        action="store_true",
+        help="Use the bundled bacon-curing transcript (default).",
+    )
+    src_sp.add_argument(
+        "--pickles",
+        action="store_true",
+        help="Use the bundled pickleback transcript.",
     )
     p_sponsors.add_argument(
         "--output",

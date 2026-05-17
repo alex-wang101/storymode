@@ -32,3 +32,23 @@ open_clip_torch
 matplotlib
 accelerate
 torchvision
+
+# api/  --  FastAPI layer that wraps the pipeline for arbitrary videos.
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+
+# api/reference_gen.py  --  cloud-VLM providers (key-prefix routed).
+anthropic
+openai
+google-genai
+
+# api/qwen_subprocess.py  --  local VLM (Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int8).
+# qwen-vl-utils ships the image preprocessing the Qwen2-VL processor expects;
+# optimum + auto-gptq are needed by transformers to load GPTQ-Int8 weights.
+# On Apple Silicon `auto-gptq` builds without CUDA kernels; if pip install
+# fails, retry with `BUILD_CUDA_EXT=0 pip install auto-gptq`.
+qwen-vl-utils
+optimum
+auto-gptq

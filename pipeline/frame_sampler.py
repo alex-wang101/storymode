@@ -110,6 +110,31 @@ def sample_frames(video_path, sponsor_regions, fps=1.0, buffer_seconds=5.0):
     return frames
 
 
+def sample_frames_whole_video(video_path, fps=1.0):
+    """Decode RGB frames from ``video_path`` at ``fps`` across the entire video.
+
+    Used by the API path when no sponsor regions are available (no transcript,
+    or transcript with zero detected sponsors). Returns ``SampledFrame``s
+    with ``region_index=0`` so the rest of the pipeline treats them as a
+    single contiguous region.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open video: {video_path}")
+
+    video_fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    if video_fps <= 0 or frame_count <= 0:
+        cap.release()
+        raise RuntimeError(f"video has zero duration or unreadable metadata: {video_path}")
+    duration = frame_count / video_fps
+
+    frames = _sample_window(cap, 0.0, duration, region_index=0, fps=fps)
+    cap.release()
+    frames.sort(key=lambda f: f.timestamp)
+    return frames
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
