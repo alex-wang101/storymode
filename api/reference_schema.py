@@ -1,13 +1,7 @@
 """Pydantic schema for the VLM-generated reference JSON.
 
-Mirrors ``data/references/zbiotics.json`` exactly. ``min_length=1`` on the
-load-bearing arrays prevents a "valid but useless" reference -- an empty
-``alternate_prompts`` or ``brand_text_keywords`` would silently produce
-zero OWLv2 detections downstream.
-
-The same model is used as the structured-output schema for cloud providers
-that enforce server-side (OpenAI's ``json_schema``, Gemini's
-``response_schema``, Anthropic's tool ``input_schema``).
+min_length=1 on arrays prevents empty alternate_prompts / brand_text_keywords,
+which would silently produce zero OWLv2 detections downstream.
 """
 
 from __future__ import annotations

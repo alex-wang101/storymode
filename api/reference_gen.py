@@ -1,16 +1,7 @@
-"""Reference-JSON generation router.
+"""Routes VLM reference-JSON generation to local Qwen or a cloud provider.
 
-Two entry points:
-
-* ``generate_reference_local(image_path, hint)`` -- shells out to the
-  Qwen subprocess (memory-isolated) and validates the raw output.
-* ``generate_reference_cloud(image_path, api_key, hint)`` -- routes on
-  the API-key prefix to one of three cloud adapters, then validates.
-
-Both return a validated ``Reference`` dict. On parse / validation failure
-they raise ``VlmJsonError`` carrying the *redacted* raw output; the api_key
-is never accessible from this module's call sites for cloud (the SecretStr
-is forwarded to the adapter and only unwrapped at the SDK call).
+Both paths return a validated Reference dict. Raises VlmJsonError on parse/validation
+failure; the api_key is forwarded as SecretStr and unwrapped only at the SDK call site.
 """
 
 from __future__ import annotations

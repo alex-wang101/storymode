@@ -1,11 +1,6 @@
-"""Single yt-dlp call that fetches video + auto-captions + metadata.
+"""Single yt-dlp call: downloads video + auto-captions + metadata together.
 
-The existing ``pipeline/transcript_ingest.fetch_from_youtube`` only fetches
-captions. The API needs the video too. Doing both in one
-``YoutubeDL.extract_info`` avoids paying the extractor cost twice and
-double-throttling against YouTube.
-
-Lives in ``api/`` so the CLI path stays unchanged.
+Lives in api/ so the CLI path (transcript-only) stays unchanged.
 """
 
 from __future__ import annotations

@@ -1,9 +1,4 @@
-"""Google Gemini adapter. Schema enforcement via response_schema.
-
-The ``api_key`` ``SecretStr`` is unwrapped exactly once, at the SDK
-construction site. Provider 4xx/5xx are caught and re-raised as
-``ProviderError`` with no key echo.
-"""
+"""Google Gemini adapter. Enforces schema via response_schema."""
 
 from __future__ import annotations
 

@@ -1,14 +1,7 @@
-"""Anthropic Claude adapter. Schema enforcement via forced tool-use.
+"""Anthropic adapter. Enforces schema via forced tool-use (no native JSON-mode).
 
-Anthropic has no native JSON-mode; the schema-enforcing path is to define
-a single tool whose ``input_schema`` is the target schema, then force
-``tool_choice`` to that tool. The model's tool-call ``input`` is the
-guaranteed-valid JSON object.
-
-The ``api_key`` ``SecretStr`` is unwrapped exactly once, at the SDK
-construction site. Provider 4xx/5xx are caught and re-raised as a
-generic ``ProviderError`` so the upstream error body -- which can echo
-the key in some 401 payloads -- never leaves this function.
+api_key is unwrapped once at the SDK constructor; all provider errors are caught
+and re-raised as ProviderError so upstream error bodies never propagate.
 """
 
 from __future__ import annotations

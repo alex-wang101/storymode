@@ -1,14 +1,4 @@
-"""Per-stage cache layout and atomic-write helpers.
-
-Job id = sha256(video_url || ref_image_sha || backend_tag || PIPELINE_VERSION)[:16].
-Threshold params live outside the key -- they only affect the millisecond
-interval-build step, which is rebuilt from brand_detections.jsonl every
-request. See plan: data/cache/jobs/<job_id>/ for the artifact layout.
-
-Atomicity: JSON files write to ``*.tmp`` then ``os.replace()``. JSONL files
-get a sibling ``.done`` marker written after the writer closes; resume
-treats missing ``.done`` as "must re-run".
-"""
+"""File-based cache for pipeline stages. Atomic JSON writes; JSONL stages use a .done sentinel."""
 
 from __future__ import annotations
 

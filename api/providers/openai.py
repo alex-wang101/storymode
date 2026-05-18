@@ -1,9 +1,4 @@
-"""OpenAI GPT-4o adapter. Schema enforcement via response_format json_schema.
-
-The ``api_key`` ``SecretStr`` is unwrapped exactly once, at the SDK
-construction site. Provider 4xx/5xx are caught and re-raised as
-``ProviderError`` with no key echo.
-"""
+"""OpenAI adapter. Enforces schema via response_format json_schema."""
 
 from __future__ import annotations
 

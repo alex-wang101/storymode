@@ -21,9 +21,7 @@ rapidfuzz
 pillow
 
 # pipeline/schema.py  --  numpy.ndarray field on SampledFrame
-# Numpy 2.x has C-ABI breakage with several common packages (pyarrow etc.);
-# pinning to <2 keeps the full stack consistent.
-numpy<2
+numpy
 
 # Used by the Stage 1 notebooks (OVOD_eval, SSL_EVAL, BRAND_eval). Not required
 # for the production CLI, but harmless to install alongside.
@@ -46,9 +44,8 @@ google-genai
 
 # api/qwen_subprocess.py  --  local VLM (Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int8).
 # qwen-vl-utils ships the image preprocessing the Qwen2-VL processor expects;
-# optimum + auto-gptq are needed by transformers to load GPTQ-Int8 weights.
-# On Apple Silicon `auto-gptq` builds without CUDA kernels; if pip install
-# fails, retry with `BUILD_CUDA_EXT=0 pip install auto-gptq`.
+# optimum is needed by transformers to load GPTQ-Int8 weights.
+# auto-gptq must be installed separately on Apple Silicon:
+#   BUILD_CUDA_EXT=0 pip install auto-gptq
 qwen-vl-utils
 optimum
-auto-gptq

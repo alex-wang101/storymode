@@ -1,14 +1,7 @@
-"""Qwen2-VL-2B-Instruct-GPTQ-Int8 inference, run as a one-shot subprocess.
+"""Qwen2-VL-2B-Instruct-GPTQ-Int8 inference as a one-shot subprocess.
 
-The parent shells out via ``asyncio.create_subprocess_exec`` so the
-allocator (MPS *or* the auto-gptq CPU dequantize kernels) is fully
-released when the child exits. ``torch.mps.empty_cache()`` alone is not
-reliable enough.
-
-Reads:    --image <path>  --hint <product-name-hint or empty>
-Writes:   <output-path> containing the raw model text (one JSON object).
-Exit 0 on inference success; non-zero (with stderr message) on model load
-or generation failure.
+Run as a subprocess so the MPS allocator is fully released on exit
+(torch.mps.empty_cache() alone isn't reliable enough for GPTQ models).
 """
 
 from __future__ import annotations
