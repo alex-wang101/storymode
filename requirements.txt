@@ -43,9 +43,17 @@ openai
 google-genai
 
 # api/qwen_subprocess.py  --  local VLM (Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int8).
-# qwen-vl-utils ships the image preprocessing the Qwen2-VL processor expects;
-# optimum is needed by transformers to load GPTQ-Int8 weights.
-# auto-gptq must be installed separately on Apple Silicon:
-#   BUILD_CUDA_EXT=0 pip install auto-gptq
+#   qwen-vl-utils:  image preprocessing the Qwen2-VL processor expects.
+#   optimum:        transformers calls into this to load GPTQ-Int8 weights.
+#   gptqmodel:      actual GPTQ kernel backend. optimum >= 2.0 imports
+#                   `QuantizeConfig` from gptqmodel (replaces the deprecated
+#                   auto-gptq, which only had CUDA kernels). The import is a
+#                   silent `try/except ImportError: pass` inside optimum — if
+#                   gptqmodel isn't installed you get a confusing runtime
+#                   `NameError: name 'QuantizeConfig' is not defined` the
+#                   first time you try to load a GPTQ model, not at import.
+#                   Apple Silicon wheels exist (incl. Python 3.14); no env
+#                   vars or build flags required.
 qwen-vl-utils
 optimum
+gptqmodel

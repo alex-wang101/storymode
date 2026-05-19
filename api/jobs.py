@@ -299,8 +299,8 @@ async def _run_job_inner(
     video_path: Path,
     backend_tag: str,
 ) -> dict:
-    # Stage 1: download video+transcript concurrently with VLM processing the reference image
-    await _notify(job_id, stage="download")
+    # Phase 1: download video+transcript concurrently with VLM processing the reference image
+    await _notify(job_id, stage="download_and_vlm")
     io = _io_task(video_url, job_dir, video_path)
     mps = _mps_task(reference_image_path, api_key, product_name_hint, job_dir)
     (resolved_video, transcript, metadata), (_backend_tag, reference) = await asyncio.gather(io, mps)
@@ -409,6 +409,6 @@ async def job_worker() -> None:
         except Exception as e:
             stage = _jobs[job_id].get("stage")
             logger.exception("[%s] failed at stage %s", job_id, stage)
-            await _notify(job_id, status="failed", error=type(e).__name__)
+            await _notify(job_id, status="failed", error=f"{type(e).__name__}: {e}")
         finally:
             _queue.task_done()

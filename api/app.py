@@ -1,4 +1,4 @@
-"""FastAPI app: POST /jobs/local, POST /jobs/cloud, GET /jobs/{id}.
+"""FastAPI app: POST /jobs/local/wait, POST /jobs/cloud/wait, GET /jobs/{id}.
 
 reference_image_path is a server-side filesystem path — keep this bound to
 localhost unless you've thought through the path-traversal implications.
@@ -11,7 +11,6 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -24,7 +23,6 @@ from .reference_gen import UnsupportedKeyPrefix
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REFERENCE_ROOT = Path(os.environ.get("VIDEOFIND_REFERENCE_ROOT", REPO_ROOT)).resolve()
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
-WAIT_TIMEOUT_SECONDS = 30  # bounded long poll — client re-calls if still running
 
 logger = logging.getLogger("videofind.api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -104,6 +102,17 @@ async def _submit(req: DetectLocalRequest, api_key: SecretStr | None) -> JobStat
     return JobStatus(job_id=job_id, **jobs._jobs[job_id])
 
 
+async def _await_terminal(job_id: str) -> JobStatus:
+    """Block (unbounded) until job hits done/failed. Caller wears the proxy-timeout risk."""
+    if jobs._jobs[job_id]["status"] in ("done", "failed"):
+        return JobStatus(job_id=job_id, **jobs._jobs[job_id])
+    cond = jobs._job_events[job_id]
+    async with cond:
+        while jobs._jobs[job_id]["status"] not in ("done", "failed"):
+            await cond.wait()
+    return JobStatus(job_id=job_id, **jobs._jobs[job_id])
+
+
 # App
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -114,8 +123,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="videofind",
     description=(
-        "Detect product appearances in a video. Submit a job, then poll "
-        "GET /jobs/{id} until status is 'done' or 'failed'."
+        "Detect product appearances in a video. POST /jobs/{local,cloud}"
+        "blocks until done; GET /jobs/{id} recovers state if the connection drops."
     ),
     lifespan=lifespan,
 )
@@ -131,13 +140,19 @@ async def log_requests(request: Request, call_next):
 
 
 @app.post("/jobs/local", response_model=JobStatus, dependencies=[Depends(require_bearer)])
-async def submit_local(req: DetectLocalRequest) -> JobStatus:
-    return await _submit(req, api_key=None)
+async def submit_local_and_wait(req: DetectLocalRequest) -> JobStatus:
+    """Submit a local job and block until done. If the connection drops, the job keeps
+    running — poll GET /jobs/{id} to recover the result."""
+    status = await _submit(req, api_key=None)
+    return await _await_terminal(status.job_id)
 
 
 @app.post("/jobs/cloud", response_model=JobStatus, dependencies=[Depends(require_bearer)])
-async def submit_cloud(req: DetectCloudRequest) -> JobStatus:
-    return await _submit(req, api_key=req.api_key)
+async def submit_cloud_and_wait(req: DetectCloudRequest) -> JobStatus:
+    """Submit a cloud job and block until done. If the connection drops, the job keeps
+    running — poll GET /jobs/{id} to recover the result."""
+    status = await _submit(req, api_key=req.api_key)
+    return await _await_terminal(status.job_id)
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatus, dependencies=[Depends(require_bearer)])
@@ -146,29 +161,3 @@ async def get_job(job_id: str) -> JobStatus:
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return JobStatus(job_id=job_id, **job)
-
-
-@app.get("/jobs/{job_id}/wait", response_model=JobStatus, dependencies=[Depends(require_bearer)])
-async def wait_for_job(job_id: str) -> JobStatus:
-    """Bounded long poll: hold the connection up to WAIT_TIMEOUT_SECONDS, then return
-    current state (terminal or not). Client re-calls if status is still running.
-    """
-    job = jobs._jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="job not found")
-    if job["status"] in ("done", "failed"):
-        return JobStatus(job_id=job_id, **job)
-
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + WAIT_TIMEOUT_SECONDS
-    cond = jobs._job_events[job_id]
-    async with cond:
-        while jobs._jobs[job_id]["status"] not in ("done", "failed"):
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            try:
-                await asyncio.wait_for(cond.wait(), timeout=remaining)
-            except asyncio.TimeoutError:
-                break
-    return JobStatus(job_id=job_id, **jobs._jobs[job_id])
