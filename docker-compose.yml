@@ -1,0 +1,23 @@
+services:
+  videofind:
+    build: .
+    image: videofind:local
+    ports:
+      - "8000:8000"
+    environment:
+      VIDEOFIND_TOKEN: ${VIDEOFIND_TOKEN:-}
+      HF_HOME: /home/app/.cache/huggingface
+      TORCH_HOME: /home/app/.cache/torch
+      XDG_CACHE_HOME: /home/app/.cache
+      PYTORCH_ENABLE_MPS_FALLBACK: "1"
+      TOKENIZERS_PARALLELISM: "false"
+    volumes:
+      - ./data:/app/data
+      - ./experiments:/app/experiments
+      - videofind-model-cache:/home/app/.cache
+      - videofind-tmp:/tmp/videofind
+    restart: unless-stopped
+
+volumes:
+  videofind-model-cache:
+  videofind-tmp:

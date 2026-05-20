@@ -113,6 +113,14 @@ end, and prints (or writes) a per-region summary.
 useful for inspecting what SponsorBlock-ML finds before any video frame
 work happens.
 
+### Docker deployment
+
+If you want to run this in a container, use the included `Dockerfile` and
+`docker-compose.yml`. The default container starts the FastAPI service; the same
+image can also run CLI commands. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the
+full build/run process, persistent volume layout, API examples, and first-run
+model-cache notes.
+
 ### Install
 
 **You don't need to install anything manually.** The first time you run

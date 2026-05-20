@@ -1,136 +1,78 @@
-"""FastAPI app: POST /jobs/local/wait, POST /jobs/cloud/wait, GET /jobs/{id}.
+"""FastAPI app — async brand-detection jobs with SSE progress.
 
-reference_image_path is a server-side filesystem path — keep this bound to
-localhost unless you've thought through the path-traversal implications.
+Flow:
+  POST /v1/brand-detections   -> 202 + job_id, pipeline runs in the background
+  GET  /v1/jobs/{id}          -> status snapshot (no result payload)
+  GET  /v1/jobs/{id}/events   -> SSE progress stream, ends with completed/failed
+  GET  /v1/jobs/{id}/result   -> final result (durable fallback if SSE dropped)
+
+The HTTP request is never held open for the pipeline run. The reference image
+is supplied as a URL and fetched server-side with SSRF guards.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from contextlib import asynccontextmanager
+import shutil
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, SecretStr
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
-from . import debug, jobs
-from .reference_gen import UnsupportedKeyPrefix
+from . import image_fetch, jobs
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-REFERENCE_ROOT = Path(os.environ.get("VIDEOFIND_REFERENCE_ROOT", REPO_ROOT)).resolve()
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 logger = logging.getLogger("videofind.api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 
-# Request models
-class DetectLocalRequest(BaseModel):
-    video_url: str = Field(min_length=1)
-    reference_image_path: str = Field(min_length=1)
-    product_name_hint: str | None = None
-    score_threshold: float = 0.6
-    max_gap_seconds: float = 2.0
-    min_frames: int = 2
+# ---- Request / response models ---------------------------------------------
+
+class BrandDetectionRequest(BaseModel):
+    youtube_url: str = Field(min_length=1)
+    reference_image_url: str = Field(min_length=1)
 
 
-class DetectCloudRequest(DetectLocalRequest):
-    api_key: SecretStr  # repr renders as '**********'; never logged or echoed
-
-
-# Response model
-class JobStatus(BaseModel):
+class AcceptedResponse(BaseModel):
     job_id: str
-    status: str           # queued | running | done | failed
+    status: str
+    events_url: str
+    result_url: str
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str            # queued | running | completed | failed
     stage: str | None = None
+    progress: int = 0
+    message: str | None = None
     error: str | None = None
-    result: dict | None = None   # present when status == "done"
 
 
-# Auth
-_bearer = HTTPBearer(auto_error=False)
+class TimestampInterval(BaseModel):
+    start: float
+    end: float
+    confidence: float
 
 
-def require_bearer(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
-    expected = os.environ.get("VIDEOFIND_TOKEN")
-    if not expected:
-        return
-    if creds is None or creds.credentials != expected:
-        raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+class ResultResponse(BaseModel):
+    job_id: str
+    status: str
+    brand_description: str
+    timestamps: list[TimestampInterval]
 
 
-def _resolve_reference_image(raw: str) -> Path:
-    """Resolve against the allow-list root. 404 on anything outside it.
-
-    Resolve before is_file check so symlinks outside the root also fail.
-    """
-    try:
-        resolved = Path(raw).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError):
-        raise HTTPException(status_code=404, detail="reference image path not readable")
-    try:
-        resolved.relative_to(REFERENCE_ROOT)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="reference image path outside allowed root")
-    if not resolved.is_file():
-        raise HTTPException(status_code=404, detail="reference image not found")
-    if resolved.stat().st_size > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="reference image exceeds 10 MB")
-    return resolved
-
-
-async def _submit(req: DetectLocalRequest, api_key: SecretStr | None) -> JobStatus:
-    image_path = _resolve_reference_image(req.reference_image_path)
-    try:
-        job_id = await jobs.submit_job(
-            video_url=req.video_url,
-            reference_image_path=image_path,
-            api_key=api_key,
-            product_name_hint=req.product_name_hint,
-            score_threshold=req.score_threshold,
-            max_gap_seconds=req.max_gap_seconds,
-            min_frames=req.min_frames,
-        )
-    except jobs.JobBusy:
-        raise HTTPException(status_code=429, detail="job queue is full")
-    except UnsupportedKeyPrefix as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return JobStatus(job_id=job_id, **jobs._jobs[job_id])
-
-
-async def _await_terminal(job_id: str) -> JobStatus:
-    """Block (unbounded) until job hits done/failed. Caller wears the proxy-timeout risk."""
-    if jobs._jobs[job_id]["status"] in ("done", "failed"):
-        return JobStatus(job_id=job_id, **jobs._jobs[job_id])
-    cond = jobs._job_events[job_id]
-    async with cond:
-        while jobs._jobs[job_id]["status"] not in ("done", "failed"):
-            await cond.wait()
-    return JobStatus(job_id=job_id, **jobs._jobs[job_id])
-
-
-# App
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    asyncio.create_task(jobs.job_worker())
-    yield
-
+# ---- App --------------------------------------------------------------------
 
 app = FastAPI(
     title="videofind",
-    description=(
-        "Detect product appearances in a video. POST /jobs/{local,cloud}"
-        "blocks until done; GET /jobs/{id} recovers state if the connection drops."
-    ),
-    lifespan=lifespan,
+    description="Async brand/product detection in YouTube videos, with SSE progress.",
 )
-
-
-app.include_router(debug.router)
 
 
 @app.middleware("http")
@@ -139,25 +81,100 @@ async def log_requests(request: Request, call_next):
     return await call_next(request)
 
 
-@app.post("/jobs/local", response_model=JobStatus, dependencies=[Depends(require_bearer)])
-async def submit_local_and_wait(req: DetectLocalRequest) -> JobStatus:
-    """Submit a local job and block until done. If the connection drops, the job keeps
-    running — poll GET /jobs/{id} to recover the result."""
-    status = await _submit(req, api_key=None)
-    return await _await_terminal(status.job_id)
+@app.post("/v1/brand-detections", status_code=202, response_model=AcceptedResponse)
+async def create_brand_detection(
+    req: BrandDetectionRequest, background_tasks: BackgroundTasks
+) -> AcceptedResponse:
+    """Accept a job and return 202 immediately; the pipeline runs in the background."""
+    job_id = jobs.new_job_id()
+
+    # Fetch the reference image up front so a bad URL fails fast with 400
+    # (rather than surfacing later as a job failure). image_fetch enforces
+    # https-only, public-IP-only, image/* content-type, and a 10 MB cap.
+    try:
+        tmp_image = await asyncio.to_thread(
+            image_fetch.fetch_image_to_temp,
+            req.reference_image_url,
+            max_bytes=MAX_IMAGE_BYTES,
+        )
+    except image_fetch.ImageFetchError as e:
+        raise HTTPException(status_code=400, detail=f"reference image fetch failed: {e}")
+
+    job_dir = jobs.ARTIFACTS_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    image_path = job_dir / f"reference{tmp_image.suffix}"
+    shutil.move(str(tmp_image), image_path)  # move handles cross-device temp dirs
+
+    jobs.create_job(job_id)
+    background_tasks.add_task(
+        jobs.run_brand_detection_pipeline, job_id, req.youtube_url, image_path
+    )
+    return AcceptedResponse(
+        job_id=job_id,
+        status="queued",
+        events_url=f"/v1/jobs/{job_id}/events",
+        result_url=f"/v1/jobs/{job_id}/result",
+    )
 
 
-@app.post("/jobs/cloud", response_model=JobStatus, dependencies=[Depends(require_bearer)])
-async def submit_cloud_and_wait(req: DetectCloudRequest) -> JobStatus:
-    """Submit a cloud job and block until done. If the connection drops, the job keeps
-    running — poll GET /jobs/{id} to recover the result."""
-    status = await _submit(req, api_key=req.api_key)
-    return await _await_terminal(status.job_id)
-
-
-@app.get("/jobs/{job_id}", response_model=JobStatus, dependencies=[Depends(require_bearer)])
-async def get_job(job_id: str) -> JobStatus:
-    job = jobs._jobs.get(job_id)
+@app.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str) -> JobStatusResponse:
+    """Current job status — no result payload (use /result for that)."""
+    job = jobs.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return JobStatus(job_id=job_id, **job)
+    return JobStatusResponse(
+        job_id=job["job_id"],
+        status=job["status"],
+        stage=job["stage"],
+        progress=job["progress"],
+        message=job["message"],
+        error=job["error"],
+    )
+
+
+@app.get("/v1/jobs/{job_id}/events")
+async def job_events(job_id: str, request: Request) -> StreamingResponse:
+    """Server-Sent Events stream of job progress.
+
+    Emits ``progress`` events as the job advances, then a terminal
+    ``completed`` (with the result inline) or ``failed`` event, then closes.
+    """
+    if jobs.get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return StreamingResponse(
+        jobs.sse_event_stream(job_id, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable proxy buffering of the stream
+        },
+    )
+
+
+@app.get("/v1/jobs/{job_id}/result", response_model=ResultResponse)
+async def get_job_result(job_id: str) -> ResultResponse:
+    """Final result. Durable fallback when the SSE connection drops or the
+    page is refreshed."""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"job is not complete yet (status: {job['status']})",
+        )
+    result = job["result"]
+    return ResultResponse(
+        job_id=job_id,
+        status="completed",
+        brand_description=result["brand_description"],
+        timestamps=result["timestamps"],
+    )
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> FileResponse:
+    """Serve the minimal frontend demo."""
+    return FileResponse(STATIC_DIR / "client.html")

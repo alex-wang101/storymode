@@ -8,6 +8,7 @@ data/ego4d/
 results/
 !results/.gitkeep
 data/cache/
+data/artifacts/
 **/__pycache__/
 
 
@@ -15,6 +16,10 @@ data/cache/
 *.py[cod]
 *.egg-info/
 .venv/
+
+# --- Python SDK build artifacts (clients/python) ---
+clients/python/dist/
+clients/python/build/
 .python-version
 .pytest_cache/
 .ruff_cache/
@@ -28,6 +33,10 @@ data/cache/
 # --- uv ---
 # uv.lock is intentionally NOT ignored; it pins the reproducible env.
 
-notebooks/*.pt                                                                                                                                                                                                                                            
+notebooks/*.pt
 notebooks/*.ts
 experiments/stage2/*
+CLAUDE.md
+label.md
+SKILL.md
+FIXES.md

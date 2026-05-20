@@ -1,17 +1,19 @@
-"""Per-job orchestrator.
+"""In-memory job store, SSE fan-out, and the background pipeline orchestrator.
 
-Phase 1 — asyncio.gather(io_task, mps_task):
-  io_task:  yt-dlp download (video + transcript + metadata)
-  mps_task: VLM → reference.json, then NaFlex → logo_embedding.npy (sequential)
+Async job model:
+  - A job record lives in the in-memory ``_jobs`` dict. No persistence layer,
+    no external queue — this is a single-process prototype.
+  - ``run_brand_detection_pipeline`` is the single background orchestrator,
+    started via FastAPI ``BackgroundTasks``. It runs the real pipeline stages
+    sequentially, each offloaded to a worker thread with ``asyncio.to_thread``
+    so the event loop (and every open SSE stream) stays responsive.
+  - State changes go through ``update_job``, which both mutates the record
+    and pushes a snapshot to every SSE subscriber queue for that job.
 
-Phase 2 — sequential pipeline stages:
-  sponsors → frames → OWLv2 → brand scoring → interval build
-
-Queue(maxsize=1) keeps only one job in memory at a time (16 GB budget).
-wait_for(30 min) prevents a stuck yt-dlp from pinning the worker forever.
-
-State notifications: each job has an asyncio.Condition in _job_events.
-_notify() updates _jobs and wakes any WebSocket handlers watching that job.
+Single-flight: the ML stages load multi-GB models onto a 16 GB MPS budget,
+so two concurrent jobs would OOM. ``_job_lock`` serializes orchestrator runs
+— a second job's status simply stays "queued" until the lock frees. This is
+the one concurrency control kept; there is intentionally no queue/Redis/etc.
 """
 
 from __future__ import annotations
@@ -21,394 +23,348 @@ import gc
 import json
 import logging
 import os
-import tempfile
+import time
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
-import numpy as np
 import torch
-from pydantic import SecretStr
+from fastapi import Request
 
-from pipeline import brand_detector, frame_sampler, object_detector, sponsor_detect
-from pipeline.brand_detector import embed_logo, load_brand_models
-from pipeline.interval_builder import build_intervals
-from pipeline.schema import BrandDetection, ObjectDetection
+from pipeline import (
+    brand_detector,
+    frame_sampler,
+    interval_builder,
+    object_detector,
+    sponsor_detect,
+)
 
-from . import cache
-from . import reference_gen
-from . import video_download
-from .reference_gen import BACKEND_LOCAL, UnsupportedKeyPrefix, backend_for_key
+from . import reference_gen, video_download
 
 
 logger = logging.getLogger("videofind.jobs")
 
-JOB_TIMEOUT_SECONDS = 30 * 60
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ARTIFACTS_ROOT = REPO_ROOT / "data" / "artifacts"
+
+# Interval-builder knobs. The /v1 request only carries the two URLs, so these
+# pipeline parameters use fixed defaults.
+SCORE_THRESHOLD = 0.6
+MAX_GAP_SECONDS = 2.0
+MIN_FRAMES = 2
+
+TERMINAL_STATES = frozenset({"completed", "failed"})
+
+# stage -> (progress %, human message). Drives both the job record and SSE.
+STAGES: dict[str, tuple[int, str]] = {
+    "queued": (0, "Job queued"),
+    "downloading_video": (10, "Downloading YouTube video"),
+    "describing_reference_image": (25, "Describing the reference image with the VLM"),
+    "sponsor_detection": (40, "Detecting sponsor segments in the transcript"),
+    "frame_sampling": (50, "Sampling video frames"),
+    "running_owlv2_detection": (65, "Running OWLv2 detection over sampled frames"),
+    "running_siglip_verification": (85, "Verifying detections with SigLIP-2 NaFlex"),
+    "aggregating_timestamps": (95, "Aggregating detections into timestamp intervals"),
+    "completed": (100, "Brand detection completed"),
+}
+
+# ---- In-memory state --------------------------------------------------------
 
 _jobs: dict[str, dict[str, Any]] = {}
-_job_events: dict[str, asyncio.Condition] = {}  # one Condition per job_id
-_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+_subscribers: dict[str, list[asyncio.Queue]] = {}
+# Serializes orchestrator runs so only one job touches the GPU at a time.
+_job_lock = asyncio.Lock()
 
 
-class JobBusy(Exception):
-    pass
+def new_job_id() -> str:
+    return uuid.uuid4().hex
 
 
-async def _notify(job_id: str, **updates: Any) -> None:
-    """Update job state and wake all long-poll handlers watching this job."""
-    _jobs[job_id].update(updates)
-    if "stage" in updates:
-        logger.info("[%s] stage → %s", job_id, updates["stage"])
-    if updates.get("status") in ("done", "failed"):
-        logger.info("[%s] %s", job_id, updates["status"])
-    cond = _job_events.get(job_id)
-    if cond is not None:
-        async with cond:
-            cond.notify_all()
-
-
-def _video_temp_path(job_id: str) -> Path:
-    return Path(tempfile.gettempdir()) / "videofind" / job_id
-
-
-def _obj_det_to_dict(d: ObjectDetection) -> dict:
-    return {
-        "timestamp": d.timestamp,
-        "region_index": d.region_index,
-        "box": list(d.box),
-        "owlv2_score": d.owlv2_score,
+def create_job(job_id: str) -> dict[str, Any]:
+    """Register a fresh job in the "queued" state."""
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+        "message": "Job queued",
+        "result": None,
+        "error": None,
+        "created_at": time.time(),
     }
+    _jobs[job_id] = job
+    _subscribers.setdefault(job_id, [])
+    return job
 
 
-def _brand_det_to_dict(d: BrandDetection) -> dict:
-    return {
-        **_obj_det_to_dict(d),
-        "ocr_score": d.ocr_score,
-        "ocr_texts": d.ocr_texts,
-        "naflex_score": d.naflex_score,
-    }
+def get_job(job_id: str) -> dict[str, Any] | None:
+    return _jobs.get(job_id)
 
 
-def _brand_det_from_dict(d: dict) -> BrandDetection:
-    return BrandDetection(
-        timestamp=d["timestamp"],
-        region_index=d["region_index"],
-        box=tuple(d["box"]),
-        owlv2_score=d["owlv2_score"],
-        ocr_score=d["ocr_score"],
-        ocr_texts=d["ocr_texts"],
-        naflex_score=d["naflex_score"],
-    )
+def update_job(job_id: str, **changes: Any) -> None:
+    """Mutate the job record and notify every SSE subscriber for this job."""
+    job = _jobs[job_id]
+    job.update(changes)
+    if "stage" in changes:
+        logger.info("[%s] stage -> %s", job_id, changes["stage"])
+    if changes.get("status") in TERMINAL_STATES:
+        logger.info("[%s] %s", job_id, changes["status"])
+    snapshot = dict(job)
+    for queue in list(_subscribers.get(job_id, [])):
+        queue.put_nowait(snapshot)
 
 
-# ---- Phase 1 tasks ----------------------------------------------------------
-
-async def _io_task(
-    video_url: str,
-    job_dir: Path,
-    video_path: Path,
-) -> tuple[Path, dict | None, dict]:
-    """Download video + transcript + metadata in one yt-dlp call."""
-    path_marker = job_dir / "video_path.txt"
-    transcript_path = job_dir / "transcript.json"
-    metadata_path = job_dir / "metadata.json"
-
-    if (
-        path_marker.is_file()
-        and Path(path_marker.read_text().strip()).is_file()
-        and cache.has_json(metadata_path)
-    ):
-        logger.debug("cache hit: download (%s)", job_dir.name)
-        existing_video = Path(path_marker.read_text().strip())
-        metadata = cache.read_json(metadata_path)
-        transcript = cache.read_json(transcript_path) if cache.has_json(transcript_path) else None
-        return existing_video, transcript, metadata
-
-    result = await asyncio.to_thread(video_download.download, video_url, video_path)
-    path_marker.write_text(str(result.video_path))
-    cache.write_json_atomic(metadata_path, result.metadata)
-    if result.transcript is not None:
-        cache.write_json_atomic(transcript_path, result.transcript)
-    else:
-        cache.write_json_atomic(transcript_path, None)
-    return result.video_path, result.transcript, result.metadata
+def _set_stage(job_id: str, stage: str) -> None:
+    progress, message = STAGES[stage]
+    update_job(job_id, status="running", stage=stage, progress=progress, message=message)
 
 
-async def _mps_task(
-    image_path: Path,
-    api_key: SecretStr | None,
-    hint: str | None,
-    job_dir: Path,
-) -> tuple[str, dict]:
-    # Sequential: VLM and NaFlex both need MPS/GPTQ kernels — can't overlap.
-    reference_path = job_dir / "reference.json"
-    logo_emb_path = job_dir / "logo_embedding.npy"
-    raw_output_path = job_dir / "reference_raw.txt"
+# ---- SSE --------------------------------------------------------------------
 
-    if cache.has_json(reference_path):
-        reference = cache.read_json(reference_path)
-        backend_tag = reference.pop("__backend__", BACKEND_LOCAL)
-    else:
-        if api_key is None:
-            reference = await reference_gen.generate_reference_local(
-                image_path, hint, raw_output_path
-            )
-            backend_tag = BACKEND_LOCAL
-        else:
-            backend_tag, reference = await reference_gen.generate_reference_cloud(
-                image_path, api_key, hint
-            )
-        to_persist = dict(reference)
-        to_persist["__backend__"] = backend_tag
-        cache.write_json_atomic(reference_path, to_persist)
-
-    if not logo_emb_path.is_file():
-        await asyncio.to_thread(_embed_reference_image, image_path, logo_emb_path)
-
-    return backend_tag, reference
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _embed_reference_image(image_path: Path, out_path: Path) -> None:
-    _, naflex_model, naflex_proc = load_brand_models()
-    emb = embed_logo(naflex_model, naflex_proc, image_path)
-    np.save(out_path, emb.detach().cpu().numpy())
-    del naflex_model, naflex_proc
-    _free_memory()
+def _format_event(job: dict[str, Any]) -> str:
+    """Render a job snapshot as one SSE event, named by the job's status."""
+    job_id = job["job_id"]
+    status = job["status"]
+    if status == "completed":
+        return _sse("completed", {
+            "job_id": job_id,
+            "status": status,
+            "stage": job["stage"],
+            "progress": job["progress"],
+            "message": job["message"],
+            "result": job["result"],
+            "result_url": f"/v1/jobs/{job_id}/result",
+        })
+    if status == "failed":
+        return _sse("failed", {
+            "job_id": job_id,
+            "status": status,
+            "stage": job["stage"],
+            "error": job["error"],
+        })
+    return _sse("progress", {
+        "job_id": job_id,
+        "status": status,
+        "stage": job["stage"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "error": job["error"],
+    })
 
 
-# ---- Phase 2 stages ---------------------------------------------------------
+async def sse_event_stream(job_id: str, request: Request) -> AsyncIterator[str]:
+    """Yield SSE frames for one client connection.
 
-def _free_memory():
+    Emits the current state immediately (so a reconnect / page refresh is
+    correct), then streams each subsequent state change. A 15 s idle
+    heartbeat keeps the connection alive through proxies. The stream closes
+    once the job reaches a terminal state or the client disconnects.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    _subscribers.setdefault(job_id, []).append(queue)
+    try:
+        job = _jobs[job_id]
+        yield _format_event(job)
+        if job["status"] in TERMINAL_STATES:
+            return
+
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                snapshot = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            yield _format_event(snapshot)
+            if snapshot["status"] in TERMINAL_STATES:
+                break
+    finally:
+        subs = _subscribers.get(job_id)
+        if subs and queue in subs:
+            subs.remove(queue)
+
+
+# ---- Pipeline plumbing ------------------------------------------------------
+
+def _free_memory() -> None:
     gc.collect()
     if torch.backends.mps.is_available():
         torch.mps.empty_cache()
 
 
-def _stage_sponsors(transcript: dict, job_dir: Path) -> list[dict]:
-    out_path = job_dir / "sponsors.json"
-    if cache.has_json(out_path):
-        logger.debug("cache hit: sponsors.json (%s)", job_dir.name)
-        return cache.read_json(out_path)
-
+def _run_sponsors(transcript: dict) -> list[dict]:
     model, tokenizer, classifier = sponsor_detect.load_models()
-    regions = sponsor_detect.find_sponsor_intervals(
-        transcript, model=model, tokenizer=tokenizer, classifier=classifier
-    )
-    del model, tokenizer, classifier
-    _free_memory()
+    try:
+        regions = sponsor_detect.find_sponsor_intervals(
+            transcript, model=model, tokenizer=tokenizer, classifier=classifier
+        )
+    finally:
+        del model, tokenizer, classifier
+        _free_memory()
+    return [r for r in regions if r.get("category") == "sponsor"]
 
-    sponsors = [r for r in regions if r.get("category") == "sponsor"]
-    cache.write_json_atomic(out_path, sponsors)
-    return sponsors
 
-
-def _stage_frames(video_path: Path, sponsors: list[dict]):
+def _run_frames(video_path: Path, sponsors: list[dict]):
     if sponsors:
         return frame_sampler.sample_frames(video_path, sponsors)
     return frame_sampler.sample_frames_whole_video(video_path)
 
 
-def _stage_owlv2(frames, reference: dict, job_dir: Path) -> list[ObjectDetection]:
-    out_path = job_dir / "detections.jsonl"
-    if cache.has_jsonl(out_path):
-        logger.debug("cache hit: detections.jsonl (%s)", job_dir.name)
-        return [
-            ObjectDetection(
-                timestamp=r["timestamp"],
-                region_index=r["region_index"],
-                box=tuple(r["box"]),
-                owlv2_score=r["owlv2_score"],
-            )
-            for r in cache.read_jsonl(out_path)
-        ]
-
+def _run_owlv2(frames, reference: dict):
     text_queries = [reference["primary_detection_prompt"]] + list(
         reference.get("alternate_prompts", [])
     )
-    model, proc = object_detector.load_owlv2()
-    dets = object_detector.detect_objects(
-        frames, model=model, processor=proc, text_queries=text_queries
-    )
-    del model, proc
-    _free_memory()
-
-    with cache.open_jsonl_writer(out_path) as f:
-        for d in dets:
-            f.write(json.dumps(_obj_det_to_dict(d)) + "\n")
-    return dets
+    model, processor = object_detector.load_owlv2()
+    try:
+        return object_detector.detect_objects(
+            frames, model=model, processor=processor, text_queries=text_queries
+        )
+    finally:
+        del model, processor
+        _free_memory()
 
 
-def _stage_brand_scoring(
-    dets: list[ObjectDetection],
-    frames,
-    reference: dict,
-    logo_emb_path: Path,
-    job_dir: Path,
-) -> list[BrandDetection]:
-    out_path = job_dir / "brand_detections.jsonl"
-    if cache.has_jsonl(out_path):
-        logger.debug("cache hit: brand_detections.jsonl (%s)", job_dir.name)
-        return [_brand_det_from_dict(r) for r in cache.read_jsonl(out_path)]
-
-    ocr_reader, naflex_model, naflex_proc = brand_detector.load_brand_models()
-    logo_emb_np = np.load(logo_emb_path)
-    logo_emb = torch.from_numpy(logo_emb_np).to(naflex_model.device)
-
-    brand_dets = brand_detector.score_detections(
-        dets,
-        frames,
-        ocr_reader=ocr_reader,
-        naflex_model=naflex_model,
-        naflex_processor=naflex_proc,
-        logo_emb=logo_emb,
-        brand_keywords=list(reference.get("brand_text_keywords", [])),
-    )
-    del ocr_reader, naflex_model, naflex_proc, logo_emb
-    _free_memory()
-
-    with cache.open_jsonl_writer(out_path) as f:
-        for d in brand_dets:
-            f.write(json.dumps(_brand_det_to_dict(d)) + "\n")
-    return brand_dets
+def _run_verification(detections, frames, reference: dict, image_path: Path):
+    ocr_reader, naflex_model, naflex_processor = brand_detector.load_brand_models()
+    try:
+        # Embed the reference image directly — no separate cached .npy file.
+        logo_emb = brand_detector.embed_logo(naflex_model, naflex_processor, image_path)
+        return brand_detector.score_detections(
+            detections,
+            frames,
+            ocr_reader=ocr_reader,
+            naflex_model=naflex_model,
+            naflex_processor=naflex_processor,
+            logo_emb=logo_emb,
+            brand_keywords=list(reference.get("brand_text_keywords", [])),
+        )
+    finally:
+        del ocr_reader, naflex_model, naflex_processor
+        _free_memory()
 
 
-def _stage_intervals(brand_dets, score_threshold, max_gap_seconds, min_frames):
-    intervals, _ = build_intervals(
+def _run_intervals(brand_dets) -> list[dict]:
+    intervals, _ = interval_builder.build_intervals(
         brand_dets,
         score_attr="naflex_score",
-        score_threshold=score_threshold,
-        max_gap_seconds=max_gap_seconds,
-        min_frames=min_frames,
+        score_threshold=SCORE_THRESHOLD,
+        max_gap_seconds=MAX_GAP_SECONDS,
+        min_frames=MIN_FRAMES,
         include_text=False,
     )
     return intervals
 
 
-# ---- Internal pipeline runner -----------------------------------------------
-
-async def _run_job_inner(
-    *,
-    video_url: str,
-    reference_image_path: Path,
-    api_key: SecretStr | None,
-    product_name_hint: str | None,
-    score_threshold: float,
-    max_gap_seconds: float,
-    min_frames: int,
-    job_id: str,
-    job_dir: Path,
-    video_path: Path,
-    backend_tag: str,
-) -> dict:
-    # Phase 1: download video+transcript concurrently with VLM processing the reference image
-    await _notify(job_id, stage="download_and_vlm")
-    io = _io_task(video_url, job_dir, video_path)
-    mps = _mps_task(reference_image_path, api_key, product_name_hint, job_dir)
-    (resolved_video, transcript, metadata), (_backend_tag, reference) = await asyncio.gather(io, mps)
-
-    await _notify(job_id, stage="sponsors")
-    sponsors: list[dict] = []
-    if transcript is not None:
-        sponsors = await asyncio.to_thread(_stage_sponsors, transcript, job_dir)
-
-    await _notify(job_id, stage="frames")
-    frames = await asyncio.to_thread(_stage_frames, resolved_video, sponsors)
-
-    await _notify(job_id, stage="detect")
-    dets = await asyncio.to_thread(_stage_owlv2, frames, reference, job_dir)
-
-    await _notify(job_id, stage="score")
-    logo_emb_path = job_dir / "logo_embedding.npy"
-    brand_dets = await asyncio.to_thread(
-        _stage_brand_scoring, dets, frames, reference, logo_emb_path, job_dir
-    )
-
-    await _notify(job_id, stage="intervals")
-    intervals = _stage_intervals(brand_dets, score_threshold, max_gap_seconds, min_frames)
-
-    try:
-        if resolved_video.is_file():
-            resolved_video.unlink()
-    except OSError:
-        pass
-
-    reference_clean = {k: v for k, v in reference.items() if k != "__backend__"}
-    return {
-        "job_id": job_id,
-        "video": metadata,
-        "reference": reference_clean,
-        "params": {
-            "score_threshold": score_threshold,
-            "max_gap_seconds": max_gap_seconds,
-            "min_frames": min_frames,
-        },
-        "sampling_mode": "sponsor" if sponsors else "whole_video",
-        "intervals": intervals,
-    }
+def _save_result(job_id: str, result: dict) -> None:
+    """Persist the final result to disk atomically (temp file + os.replace)."""
+    path = ARTIFACTS_ROOT / job_id / "result.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(result, indent=2))
+    os.replace(tmp, path)
 
 
-# ---- Public API -------------------------------------------------------------
+# ---- Orchestrator -----------------------------------------------------------
 
-async def submit_job(
-    *,
-    video_url: str,
-    reference_image_path: Path,
-    api_key: SecretStr | None,
-    product_name_hint: str | None,
-    score_threshold: float,
-    max_gap_seconds: float,
-    min_frames: int,
-) -> str:
-    """Queue a job and return its job_id immediately.
+async def run_brand_detection_pipeline(
+    job_id: str, youtube_url: str, image_path: Path
+) -> None:
+    """Single background task: run the whole pipeline for one job.
 
-    Returns the same job_id if this (video, image, backend) tuple is already
-    tracked — the caller can connect to WS /jobs/{id}/ws without re-submitting.
-    Raises JobBusy if the queue is full, UnsupportedKeyPrefix on a bad key prefix.
+    Dependent stages run sequentially with ``await``. Each blocking ML stage
+    is dispatched through ``asyncio.to_thread`` so it never stalls the event
+    loop or the SSE streams. ``_job_lock`` ensures only one job runs at a
+    time (16 GB MPS budget); a waiting job's status stays "queued".
     """
-    image_bytes = reference_image_path.read_bytes()
-    image_sha = cache.hash_image_bytes(image_bytes)
-    backend_tag = BACKEND_LOCAL if api_key is None else backend_for_key(api_key)
-    job_id = cache.job_id_for(video_url, image_sha, backend_tag)
-
-    if job_id in _jobs:
-        return job_id
-
-    try:
-        _queue.put_nowait((job_id, dict(
-            video_url=video_url,
-            reference_image_path=reference_image_path,
-            api_key=api_key,
-            product_name_hint=product_name_hint,
-            score_threshold=score_threshold,
-            max_gap_seconds=max_gap_seconds,
-            min_frames=min_frames,
-            job_id=job_id,
-            job_dir=cache.cache_dir(job_id),
-            video_path=_video_temp_path(job_id),
-            backend_tag=backend_tag,
-        )))
-    except asyncio.QueueFull:
-        raise JobBusy("job queue is full")
-
-    _jobs[job_id] = {"status": "queued", "stage": None}
-    _job_events[job_id] = asyncio.Condition()
-    return job_id
-
-
-async def job_worker() -> None:
-    """Long-running background task. Pulls one job at a time from the queue."""
-    while True:
-        job_id, kwargs = await _queue.get()
-        logger.info("[%s] dequeued", job_id)
-        await _notify(job_id, status="running")
+    async with _job_lock:
+        job_dir = ARTIFACTS_ROOT / job_id
+        resolved_video: Path | None = None
         try:
-            result = await asyncio.wait_for(
-                _run_job_inner(**kwargs),
-                timeout=JOB_TIMEOUT_SECONDS,
+            # Stage 1: download video + auto-captions + metadata (yt-dlp).
+            _set_stage(job_id, "downloading_video")
+            download = await asyncio.to_thread(
+                video_download.download, youtube_url, job_dir / "video"
             )
-            await _notify(job_id, status="done", result=result)
+            resolved_video = download.video_path
+            transcript = download.transcript
+
+            # Stage 2: VLM describes the reference image. generate_reference_local
+            # is already async (it spawns the Qwen subprocess) — await directly.
+            _set_stage(job_id, "describing_reference_image")
+            reference = await reference_gen.generate_reference_local(
+                image_path, None, job_dir / "reference_raw.txt"
+            )
+
+            # Stage 3: sponsor segments (no-op when the video has no transcript).
+            _set_stage(job_id, "sponsor_detection")
+            sponsors: list[dict] = []
+            if transcript is not None:
+                sponsors = await asyncio.to_thread(_run_sponsors, transcript)
+
+            # Stage 4: decode frames (inside sponsor regions, else whole video).
+            _set_stage(job_id, "frame_sampling")
+            frames = await asyncio.to_thread(_run_frames, resolved_video, sponsors)
+
+            # Stage 5: OWLv2 text-guided detection on every sampled frame.
+            _set_stage(job_id, "running_owlv2_detection")
+            detections = await asyncio.to_thread(_run_owlv2, frames, reference)
+
+            # Stage 6: SigLIP-2 NaFlex (+ OCR) verification of each box.
+            _set_stage(job_id, "running_siglip_verification")
+            brand_dets = await asyncio.to_thread(
+                _run_verification, detections, frames, reference, image_path
+            )
+
+            # Stage 7: group score-positive frames into timestamp intervals.
+            _set_stage(job_id, "aggregating_timestamps")
+            intervals = await asyncio.to_thread(_run_intervals, brand_dets)
+
+            result = {
+                "brand_description": reference.get("primary_detection_prompt", ""),
+                "timestamps": [
+                    {
+                        "start": iv["start"],
+                        "end": iv["end"],
+                        "confidence": iv["max_naflex_score"],
+                    }
+                    for iv in intervals
+                ],
+            }
+
+            # Persist server-side BEFORE emitting the completed SSE event.
+            # Why both: SSE delivery is best-effort — the client connection can
+            # drop mid-run — so the on-disk copy is the durable source of truth
+            # that GET /v1/jobs/{id}/result can always read. The completed SSE
+            # event also carries the result inline so a still-connected client
+            # gets it immediately without a second request.
+            _save_result(job_id, result)
+            update_job(
+                job_id,
+                status="completed",
+                stage="completed",
+                progress=100,
+                message=STAGES["completed"][1],
+                result=result,
+            )
         except Exception as e:
-            stage = _jobs[job_id].get("stage")
-            logger.exception("[%s] failed at stage %s", job_id, stage)
-            await _notify(job_id, status="failed", error=f"{type(e).__name__}: {e}")
+            # BackgroundTasks swallows exceptions, so the orchestrator must
+            # record its own terminal failure state.
+            logger.exception("[%s] pipeline failed", job_id)
+            update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                error=f"{type(e).__name__}: {e}",
+            )
         finally:
-            _queue.task_done()
+            # The downloaded video is large and regenerable — drop it. The
+            # reference image and result.json stay under data/artifacts/.
+            try:
+                if resolved_video is not None and resolved_video.is_file():
+                    resolved_video.unlink()
+            except OSError:
+                pass

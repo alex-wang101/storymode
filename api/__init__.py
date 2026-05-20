@@ -1,11 +1,20 @@
 """FastAPI layer that wraps the videofind pipeline for arbitrary videos.
 
-Exposes two endpoints (cloud / local) that run the full pipeline against a
-user-supplied video URL + reference image, with per-stage caching so an
-interrupted job resumes cheaply. The CLI in ``main.py`` is unaffected.
+Exposes an async brand-detection API: submit a job, watch progress over SSE,
+fetch the result. The CLI in ``main.py`` is unaffected.
 """
 
-# Bump when any cached-stage producer changes (model revision, prompt,
-# extraction logic). Old cache dirs become unreachable on bump, which is
-# the point -- silent staleness is worse than re-running a stage.
-PIPELINE_VERSION = "1"
+import os as _os
+
+# Point urllib/ssl at certifi's CA bundle. Python.org's macOS build ships
+# without bundled root certs, so the first time easyocr / huggingface tries
+# to download a model over HTTPS we hit SSL_CERTIFICATE_VERIFY_FAILED.
+# Set before any HTTPS call so subprocesses inherit it too.
+try:
+    import certifi as _certifi
+
+    _ca = _certifi.where()
+    _os.environ.setdefault("SSL_CERT_FILE", _ca)
+    _os.environ.setdefault("REQUESTS_CA_BUNDLE", _ca)
+except ImportError:
+    pass

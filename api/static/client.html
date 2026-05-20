@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>videofind — brand detection demo</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px;
+           margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+    h1 { font-size: 20px; }
+    label { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 13px; }
+    input[type=text] { width: 100%; padding: 8px; box-sizing: border-box;
+                       border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+    button { margin-top: 16px; padding: 8px 16px; border: 0; border-radius: 6px;
+             background: #1a1a1a; color: #fff; font-size: 13px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    #bar { height: 10px; background: #eee; border-radius: 5px; margin-top: 16px;
+           overflow: hidden; }
+    #fill { height: 100%; width: 0; background: #2d7; transition: width .3s; }
+    #log { margin-top: 8px; font-size: 12px; color: #666; }
+    #results { margin-top: 16px; }
+    .iv { padding: 6px 10px; background: #f3f3f3; border-radius: 6px;
+          margin-bottom: 6px; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .err { color: #c33; }
+  </style>
+</head>
+<body>
+  <h1>videofind — brand detection</h1>
+
+  <label for="youtube_url">YouTube URL</label>
+  <input type="text" id="youtube_url"
+         value="https://www.youtube.com/watch?v=4GBf9ZO2UN8&t=452s" />
+
+  <label for="reference_image_url">Reference image URL</label>
+  <input type="text" id="reference_image_url"
+         placeholder="https://.../product.png" />
+
+  <button id="go">Detect</button>
+
+  <div id="bar"><div id="fill"></div></div>
+  <div id="log"></div>
+  <div id="results"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    $("go").addEventListener("click", async () => {
+      $("go").disabled = true;
+      $("results").innerHTML = "";
+      $("fill").style.width = "0";
+      $("log").className = "";
+      $("log").textContent = "Submitting…";
+
+      // 1. POST the job — returns 202 immediately with a job_id.
+      let job;
+      try {
+        const resp = await fetch("/v1/brand-detections", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            youtube_url: $("youtube_url").value,
+            reference_image_url: $("reference_image_url").value,
+          }),
+        });
+        job = await resp.json();
+        if (!resp.ok) throw new Error(job.detail || resp.statusText);
+      } catch (e) {
+        $("log").className = "err";
+        $("log").textContent = "Submit failed: " + e.message;
+        $("go").disabled = false;
+        return;
+      }
+
+      // 2. Open the SSE stream and react to progress / completed / failed.
+      const es = new EventSource(`/v1/jobs/${job.job_id}/events`);
+
+      es.addEventListener("progress", (ev) => {
+        const d = JSON.parse(ev.data);
+        $("fill").style.width = d.progress + "%";
+        $("log").textContent = `[${d.stage}] ${d.message}`;
+      });
+
+      es.addEventListener("completed", (ev) => {
+        const d = JSON.parse(ev.data);
+        $("fill").style.width = "100%";
+        $("log").textContent = "Done. " + d.result.brand_description;
+        renderTimestamps(d.result.timestamps);
+        es.close();              // 3. close the stream once finished
+        $("go").disabled = false;
+      });
+
+      es.addEventListener("failed", (ev) => {
+        const d = JSON.parse(ev.data);
+        $("log").className = "err";
+        $("log").textContent = "Failed: " + d.error;
+        es.close();
+        $("go").disabled = false;
+      });
+
+      es.onerror = () => {
+        // Connection dropped — the job keeps running server-side.
+        // GET /v1/jobs/{id}/result is the durable fallback.
+        $("log").textContent += "  (SSE connection lost)";
+      };
+    });
+
+    function renderTimestamps(timestamps) {
+      const box = $("results");
+      if (!timestamps.length) {
+        box.textContent = "No appearances detected.";
+        return;
+      }
+      for (const t of timestamps) {
+        const div = document.createElement("div");
+        div.className = "iv";
+        div.textContent =
+          `${t.start.toFixed(1)}s – ${t.end.toFixed(1)}s` +
+          `   (confidence ${t.confidence.toFixed(3)})`;
+        box.appendChild(div);
+      }
+    }
+  </script>
+</body>
+</html>

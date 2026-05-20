@@ -74,7 +74,19 @@ async def generate_reference_local(
     hint: str | None,
     raw_output_path: Path,
 ) -> dict:
-    """Run Qwen in a child process; parse + validate its output."""
+    """Run Qwen in a child process; parse + validate its output.
+
+    If a sidecar ``<image>.json`` exists next to the reference image and parses
+    against the Reference schema, use it directly. The local Qwen2-VL-2B model
+    is too small to reliably emit the nested schema; curated sidecars are the
+    intended local-mode workflow for known products.
+    """
+    sidecar = image_path.with_suffix(".json")
+    if sidecar.is_file():
+        raw = sidecar.read_text()
+        parsed = _strip_and_parse(raw)
+        return _validate(parsed, raw)
+
     args = [
         sys.executable, "-m", "api.qwen_subprocess",
         "--image", str(image_path),
