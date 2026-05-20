@@ -229,11 +229,14 @@ def _run_owlv2(frames, reference: dict):
         _free_memory()
 
 
-def _run_verification(detections, frames, reference: dict, image_path: Path):
+def _run_verification(detections, frames, reference: dict, brand_image_path: Path):
     ocr_reader, naflex_model, naflex_processor = brand_detector.load_brand_models()
     try:
-        # Embed the reference image directly — no separate cached .npy file.
-        logo_emb = brand_detector.embed_logo(naflex_model, naflex_processor, image_path)
+        # Embed the brand image (logo) — this is the vector each detected crop
+        # is cosine-compared against. No separate cached .npy file.
+        logo_emb = brand_detector.embed_logo(
+            naflex_model, naflex_processor, brand_image_path
+        )
         return brand_detector.score_detections(
             detections,
             frames,
@@ -271,9 +274,18 @@ def _save_result(job_id: str, result: dict) -> None:
 # ---- Orchestrator -----------------------------------------------------------
 
 async def run_brand_detection_pipeline(
-    job_id: str, youtube_url: str, image_path: Path
+    job_id: str,
+    youtube_url: str,
+    object_image_path: Path,
+    brand_image_path: Path,
 ) -> None:
     """Single background task: run the whole pipeline for one job.
+
+    Two reference images, each wired to exactly one role:
+      - ``object_image_path`` (product photo) -> the VLM describe stage, which
+        produces the OWLv2 detection prompts and OCR brand keywords.
+      - ``brand_image_path`` (brand logo) -> the NaFlex verification stage,
+        which embeds it as the vector detected crops are scored against.
 
     Dependent stages run sequentially with ``await``. Each blocking ML stage
     is dispatched through ``asyncio.to_thread`` so it never stalls the event
@@ -292,11 +304,11 @@ async def run_brand_detection_pipeline(
             resolved_video = download.video_path
             transcript = download.transcript
 
-            # Stage 2: VLM describes the reference image. generate_reference_local
+            # Stage 2: VLM describes the object image. generate_reference_local
             # is already async (it spawns the Qwen subprocess) — await directly.
             _set_stage(job_id, "describing_reference_image")
             reference = await reference_gen.generate_reference_local(
-                image_path, None, job_dir / "reference_raw.txt"
+                object_image_path, None, job_dir / "reference_raw.txt"
             )
 
             # Stage 3: sponsor segments (no-op when the video has no transcript).
@@ -314,9 +326,10 @@ async def run_brand_detection_pipeline(
             detections = await asyncio.to_thread(_run_owlv2, frames, reference)
 
             # Stage 6: SigLIP-2 NaFlex (+ OCR) verification of each box.
+            # NaFlex embeds the brand image; OCR matches the VLM's keywords.
             _set_stage(job_id, "running_siglip_verification")
             brand_dets = await asyncio.to_thread(
-                _run_verification, detections, frames, reference, image_path
+                _run_verification, detections, frames, reference, brand_image_path
             )
 
             # Stage 7: group score-positive frames into timestamp intervals.

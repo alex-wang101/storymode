@@ -23,7 +23,8 @@ from stamped import StampedClient
 with StampedClient("http://localhost:8000") as client:
     result = client.detect(
         youtube_url="https://www.youtube.com/watch?v=4GBf9ZO2UN8",
-        reference_image_url="https://example.com/product.png",
+        object_image_url="https://example.com/product-photo.png",
+        brand_image_url="https://example.com/logo.png",
         on_progress=lambda e: print(f"{e.progress:3d}%  {e.stage}"),
     )
 
@@ -35,13 +36,24 @@ with StampedClient("http://localhost:8000") as client:
 `detect()` submits the job, follows it to completion over Server-Sent Events,
 and returns the final result.
 
+Two reference images are required, each playing a distinct role:
+
+- **`object_image_url`** — a photo of the physical product. Drives the
+  description of *what shape to look for*.
+- **`brand_image_url`** — the brand logo / mark. Used to verify a detected
+  object actually carries the right brand.
+
 ## Lower-level API
 
 For more control, drive the job lifecycle yourself:
 
 ```python
 with StampedClient("http://localhost:8000") as client:
-    job = client.submit(youtube_url=..., reference_image_url=...)  # returns at once
+    job = client.submit(                # returns at once
+        youtube_url=...,
+        object_image_url=...,
+        brand_image_url=...,
+    )
 
     for event in job.stream():          # iterate SSE progress events
         print(event.kind, event.status, event.stage, event.progress)

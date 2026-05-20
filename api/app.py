@@ -35,7 +35,16 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 
 class BrandDetectionRequest(BaseModel):
     youtube_url: str = Field(min_length=1)
-    reference_image_url: str = Field(min_length=1)
+    object_image_url: str = Field(
+        min_length=1,
+        description="Photo of the physical product — drives the VLM description "
+        "and OWLv2 detection prompts (what shape to look for).",
+    )
+    brand_image_url: str = Field(
+        min_length=1,
+        description="The brand logo / mark — embedded by NaFlex to verify that a "
+        "detected object carries the right brand.",
+    )
 
 
 class AcceptedResponse(BaseModel):
@@ -81,6 +90,18 @@ async def log_requests(request: Request, call_next):
     return await call_next(request)
 
 
+async def _fetch_reference(url: str, role: str) -> Path:
+    """Fetch one reference image, mapping any failure to a 400 naming its role."""
+    try:
+        return await asyncio.to_thread(
+            image_fetch.fetch_image_to_temp, url, max_bytes=MAX_IMAGE_BYTES
+        )
+    except image_fetch.ImageFetchError as e:
+        raise HTTPException(
+            status_code=400, detail=f"{role} image fetch failed: {e}"
+        )
+
+
 @app.post("/v1/brand-detections", status_code=202, response_model=AcceptedResponse)
 async def create_brand_detection(
     req: BrandDetectionRequest, background_tasks: BackgroundTasks
@@ -88,26 +109,31 @@ async def create_brand_detection(
     """Accept a job and return 202 immediately; the pipeline runs in the background."""
     job_id = jobs.new_job_id()
 
-    # Fetch the reference image up front so a bad URL fails fast with 400
+    # Fetch both reference images up front so a bad URL fails fast with 400
     # (rather than surfacing later as a job failure). image_fetch enforces
     # https-only, public-IP-only, image/* content-type, and a 10 MB cap.
+    object_tmp = await _fetch_reference(req.object_image_url, "object")
     try:
-        tmp_image = await asyncio.to_thread(
-            image_fetch.fetch_image_to_temp,
-            req.reference_image_url,
-            max_bytes=MAX_IMAGE_BYTES,
-        )
-    except image_fetch.ImageFetchError as e:
-        raise HTTPException(status_code=400, detail=f"reference image fetch failed: {e}")
+        brand_tmp = await _fetch_reference(req.brand_image_url, "brand")
+    except HTTPException:
+        object_tmp.unlink(missing_ok=True)  # don't leak the first temp file
+        raise
 
     job_dir = jobs.ARTIFACTS_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    image_path = job_dir / f"reference{tmp_image.suffix}"
-    shutil.move(str(tmp_image), image_path)  # move handles cross-device temp dirs
+    object_path = job_dir / f"object{object_tmp.suffix}"
+    brand_path = job_dir / f"brand{brand_tmp.suffix}"
+    # shutil.move handles cross-device temp dirs (/tmp may be a separate mount).
+    shutil.move(str(object_tmp), object_path)
+    shutil.move(str(brand_tmp), brand_path)
 
     jobs.create_job(job_id)
     background_tasks.add_task(
-        jobs.run_brand_detection_pipeline, job_id, req.youtube_url, image_path
+        jobs.run_brand_detection_pipeline,
+        job_id,
+        req.youtube_url,
+        object_path,
+        brand_path,
     )
     return AcceptedResponse(
         job_id=job_id,

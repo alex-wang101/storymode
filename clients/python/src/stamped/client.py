@@ -84,7 +84,8 @@ class StampedClient:
         with StampedClient("http://localhost:8000") as client:
             result = client.detect(
                 youtube_url="https://www.youtube.com/watch?v=...",
-                reference_image_url="https://.../product.png",
+                object_image_url="https://.../product-photo.png",
+                brand_image_url="https://.../logo.png",
                 on_progress=lambda e: print(e.progress, e.stage),
             )
             for ts in result.timestamps:
@@ -106,13 +107,24 @@ class StampedClient:
 
     # -- low-level endpoint wrappers -----------------------------------------
 
-    def submit(self, youtube_url: str, reference_image_url: str) -> "Job":
-        """POST a detection job. Returns immediately with a Job handle."""
+    def submit(
+        self,
+        *,
+        youtube_url: str,
+        object_image_url: str,
+        brand_image_url: str,
+    ) -> "Job":
+        """POST a detection job. Returns immediately with a Job handle.
+
+        ``object_image_url`` is a photo of the product (what to find);
+        ``brand_image_url`` is the brand logo (used to verify the brand).
+        """
         response = self._http.post(
             "/v1/brand-detections",
             json={
                 "youtube_url": youtube_url,
-                "reference_image_url": reference_image_url,
+                "object_image_url": object_image_url,
+                "brand_image_url": brand_image_url,
             },
         )
         _raise_for_status(response)
@@ -148,20 +160,24 @@ class StampedClient:
 
     def detect(
         self,
-        youtube_url: str,
-        reference_image_url: str,
         *,
+        youtube_url: str,
+        object_image_url: str,
+        brand_image_url: str,
         on_progress: Optional[Callable[[ProgressEvent], None]] = None,
         timeout: Optional[float] = None,
     ) -> Result:
         """Submit a job, follow it to completion, and return the Result.
 
-        ``on_progress`` is invoked for every progress update. Raises
-        JobFailedError if the job fails, JobTimeoutError on timeout.
+        ``object_image_url`` is a photo of the product; ``brand_image_url`` is
+        the brand logo. ``on_progress`` is invoked for every progress update.
+        Raises JobFailedError if the job fails, JobTimeoutError on timeout.
         """
-        return self.submit(youtube_url, reference_image_url).wait(
-            on_progress=on_progress, timeout=timeout
-        )
+        return self.submit(
+            youtube_url=youtube_url,
+            object_image_url=object_image_url,
+            brand_image_url=brand_image_url,
+        ).wait(on_progress=on_progress, timeout=timeout)
 
 
 class Job:

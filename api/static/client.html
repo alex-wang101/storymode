@@ -31,9 +31,13 @@
   <input type="text" id="youtube_url"
          value="https://www.youtube.com/watch?v=4GBf9ZO2UN8&t=452s" />
 
-  <label for="reference_image_url">Reference image URL</label>
-  <input type="text" id="reference_image_url"
-         placeholder="https://.../product.png" />
+  <label for="object_image_url">Object image URL <small>(photo of the product)</small></label>
+  <input type="text" id="object_image_url"
+         placeholder="https://.../product-photo.png" />
+
+  <label for="brand_image_url">Brand image URL <small>(the brand logo / mark)</small></label>
+  <input type="text" id="brand_image_url"
+         placeholder="https://.../logo.png" />
 
   <button id="go">Detect</button>
 
@@ -59,7 +63,8 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             youtube_url: $("youtube_url").value,
-            reference_image_url: $("reference_image_url").value,
+            object_image_url: $("object_image_url").value,
+            brand_image_url: $("brand_image_url").value,
           }),
         });
         job = await resp.json();
